@@ -1,4 +1,4 @@
-"""Stopen 一键安装脚本"""
+"""Stopen 一键安装脚本（pip 依赖 + 初始化 storage/ 目录）"""
 import subprocess, sys
 from pathlib import Path
 

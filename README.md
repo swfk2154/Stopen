@@ -8,6 +8,38 @@
 
 ## 1. Quick Start
 
+### 0.1 Clone
+
+```powershell
+git clone https://github.com/swfk2154/Stopen.git
+cd Stopen
+```
+
+### 0.2 One-Click Install
+
+```powershell
+python install.py
+```
+
+The script automatically:
+- **Installs Python dependencies**: `pip install -r requirements.txt` (FastAPI, aiohttp, cryptography, etc.)
+- **Initializes storage directories**: creates `stopen/storage/logs/` and `stopen/storage/uploads/`
+
+> Manual install: `pip install -r requirements.txt`
+
+### 0.3 Build Frontend (Optional)
+
+Skip if the pre-built frontend works fine. Rebuild if the UI page is blank:
+
+```powershell
+cd stopen/frontend
+npm install
+npx vite build
+cd ../..
+```
+
+> Pre-built frontend is included in the repo — this step is usually not needed.
+
 ### 1.1 Start Backend
 
 ```powershell
@@ -373,6 +405,7 @@ Any natural language input automatically routes to LLM chat.
 Stopen/
 ├── run.py                    # Backend entry (supports --port/--host)
 ├── cli.py                    # CLI terminal (interactive + single-command)
+├── install.py                # One-click install script (pip deps + storage/ init)
 ├── .gitignore                # Git exclusion rules
 ├── README.md                 # English documentation
 ├── README_CN.md              # Chinese documentation

@@ -8,6 +8,38 @@
 
 ## 一、快速启动
 
+### 0.1 克隆项目
+
+```powershell
+git clone https://github.com/swfk2154/Stopen.git
+cd Stopen
+```
+
+### 0.2 一键安装
+
+```powershell
+python install.py
+```
+
+脚本会自动完成：
+- **安装 Python 依赖**：通过 `pip install -r requirements.txt` 安装 FastAPI、aiohttp、cryptography 等依赖
+- **初始化存储目录**：创建 `stopen/storage/logs/` 和 `stopen/storage/uploads/`
+
+> 也可以手动安装：`pip install -r requirements.txt`
+
+### 0.3 构建前端（可选）
+
+如果前端页面空白或需要更新：
+
+```powershell
+cd stopen/frontend
+npm install
+npx vite build
+cd ../..
+```
+
+> 预构建的前端已包含在仓库中，通常不需要此步骤。
+
 ### 1.1 启动后端
 
 ```powershell
@@ -373,6 +405,7 @@ Stdio 模式下，command 和 args 会直接启动子进程，请确保命令可
 Stopen/
 ├── run.py                    # 后端启动入口（支持 --port / --host 参数）
 ├── cli.py                    # CLI 终端（交互式 + 单次命令模式）
+├── install.py                # 一键安装脚本（pip 依赖 + 初始化 storage/ 目录）
 ├── .gitignore                # Git 排除规则
 ├── README.md                 # 英文说明文档
 ├── README_CN.md              # 中文说明文档（本文件）
