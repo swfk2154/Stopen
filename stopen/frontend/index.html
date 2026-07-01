@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stopen - 自动化渗透测试 Agent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      transition: background 0.3s, color 0.3s;
+    }
+    body.light { background: #f8f9fa; color: #1a1a1a; }
+    body.dark { background: #0f0f0f; color: #e0e0e0; }
+    :root {
+      --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --radius: 12px;
+      --radius-sm: 6px;
+      --shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06);
+      --shadow-lg: 0 4px 6px rgba(0,0,0,0.1), 0 2px 4px rgba(0,0,0,0.06);
+    }
+    body.dark {
+      --bg-primary: #0f0f0f;
+      --bg-card: #1a1a1a;
+      --bg-hover: #222222;
+      --bg-sidebar: #111111;
+      --border: #2a2a2a;
+      --text: #e0e0e0;
+      --text-dim: #6b7280;
+      --accent: #7c3aed;
+      --accent-hover: #6d28d9;
+      --accent-light: rgba(124, 58, 237, 0.15);
+      --success: #22c55e;
+      --error: #ef4444;
+      --warning: #f59e0b;
+      --info: #3b82f6;
+    }
+    body.light {
+      --bg-primary: #f8f9fa;
+      --bg-card: #ffffff;
+      --bg-hover: #f3f4f6;
+      --bg-sidebar: #ffffff;
+      --border: #e5e7eb;
+      --text: #1a1a1a;
+      --text-dim: #6b7280;
+      --accent: #7c3aed;
+      --accent-hover: #6d28d9;
+      --accent-light: rgba(124, 58, 237, 0.1);
+      --success: #16a34a;
+      --error: #dc2626;
+      --warning: #d97706;
+      --info: #2563eb;
+    }
+    * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    a { color: var(--accent); text-decoration: none; }
+    input, select, textarea, button { font-family: var(--font); }
+  </style>
+</head>
+<body class="dark">
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
+</body>
+</html>
