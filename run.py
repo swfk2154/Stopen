@@ -12,7 +12,7 @@ import argparse
 import os
 
 parser = argparse.ArgumentParser(description="Stopen 自动化渗透测试平台")
-parser.add_argument("--host", default="127.0.0.1", help="监听地址 (默认 127.0.0.1，仅本机访问；使用 0.0.0.0 开放局域网)")
+parser.add_argument("--host", default="0.0.0.0", help="监听地址 (默认 0.0.0.0，局域网可访问；设为 127.0.0.1 仅本机)")
 parser.add_argument("--port", type=int, default=int(os.environ.get("STOPEN_PORT", 8080)),
                     help=f"监听端口 (默认 8080, 环境变量 STOPEN_PORT)")
 parser.add_argument("--no-reload", action="store_true", help="禁用热重载")
