@@ -123,6 +123,26 @@ def install_deps():
     return False
 
 
+def build_frontend():
+    """npm install + vite build"""
+    frontend_dir = ROOT / "stopen" / "frontend"
+    if not (frontend_dir / "package.json").is_file():
+        return False
+
+    # npm install
+    r1 = subprocess.run(["npm", "install"], cwd=str(frontend_dir), capture_output=True, text=True, timeout=120)
+    if r1.returncode != 0:
+        print(f"  npm install 失败")
+        return False
+
+    # vite build
+    r2 = subprocess.run(["npx", "vite", "build"], cwd=str(frontend_dir), capture_output=True, text=True, timeout=120)
+    if r2.returncode != 0:
+        print(f"  vite build 失败")
+        return False
+    return True
+
+
 def main():
     print("=" * 50)
     print("Stopen - 自动化渗透测试 Agent")
@@ -131,8 +151,21 @@ def main():
     if not install_deps():
         sys.exit(1)
 
+    # 前端构建（如无 dist）
+    frontend_dist = ROOT / "stopen" / "frontend" / "dist"
+    if not (frontend_dist / "index.html").is_file():
+        print("\n[2/3] 构建前端...")
+        npm_ok = build_frontend()
+        if npm_ok:
+            print("✓ 前端构建完成")
+        else:
+            print("⚠ 前端构建失败，后端将以 API-only 模式运行")
+            print("  可手动构建: cd stopen/frontend && npm install && npx vite build")
+    else:
+        print("\n[2/3] 前端 dist 已存在，跳过构建")
+
     # 初始化存储目录
-    print("\n[2/2] 初始化存储目录...")
+    print("\n[3/3] 初始化存储目录...")
     storage_dirs = [
         ROOT / "stopen" / "storage",
         ROOT / "stopen" / "storage" / "logs",
