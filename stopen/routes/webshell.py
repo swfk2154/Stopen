@@ -16,7 +16,12 @@ async def create_webshell(data: WebShellCreate):
 
 @router.get("")
 async def list_webshells():
-    return {"webshells": db.list_webshells()}
+    rows = db.list_webshells()
+    # 密码不回传前端（连接口令在服务端使用）；兼容前端编辑场景留空即可
+    for w in rows:
+        if w.get("password"):
+            w["password"] = "****"
+    return {"webshells": rows}
 
 
 @router.post("/{wid}/exec")

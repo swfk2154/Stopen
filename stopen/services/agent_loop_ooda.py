@@ -40,7 +40,7 @@ def _classify_failure(tool_name: str, error: str) -> str:
     err_lower = error.lower()
     if "not found" in err_lower or "no such file" in err_lower:
         return "env_limit"
-    if "timeout" in err_lower:
+    if "timeout" in err_lower or "timed out" in err_lower:
         return "timeout"
     if "permission" in err_lower or "denied" in err_lower or "refused" in err_lower:
         return "permission"

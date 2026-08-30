@@ -1,5 +1,7 @@
 """SQLite 存储 —— 会话 + 任务 + C2"""
-import sqlite3, threading
+import os
+import sqlite3
+import threading
 from datetime import datetime
 from pathlib import Path
 from app_config.settings import DB_PATH
@@ -9,15 +11,50 @@ class Database:
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
+        # 每线程独立连接（WAL 模式），避免共享单连接的并发游标竞争
+        self._local = threading.local()
+        self._fernet = None
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
-        return self.conn
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(str(self.db_path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            self._local.conn = conn
+        return conn
+
+    # ---- 敏感字段加密（与 config 共用 keyfile.key，密文落库，读取时透明解密）----
+    def _get_fernet(self):
+        if self._fernet is None:
+            from cryptography.fernet import Fernet
+            key_path = Path(os.environ.get("STOPEN_KEY_PATH", "") or (self.db_path.parent / "keyfile.key"))
+            if key_path.exists():
+                key = key_path.read_bytes()
+            else:
+                key = Fernet.generate_key()
+                key_path.write_bytes(key)
+            self._fernet = Fernet(key)
+        return self._fernet
+
+    def _encrypt(self, value: str) -> str:
+        if not value:
+            return value
+        return self._get_fernet().encrypt(value.encode("utf-8")).decode("ascii")
+
+    def _decrypt(self, value: str) -> str:
+        """兼容历史明文：解密失败时原样返回"""
+        if not value:
+            return value
+        try:
+            return self._get_fernet().decrypt(value.encode("ascii")).decode("utf-8")
+        except Exception:
+            return value
 
     def _init_db(self):
-        conn = self.conn
+        conn = self._get_conn()
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         conn.executescript("""
@@ -328,19 +365,24 @@ class Database:
         now = self._now()
         self._get_conn().execute(
             "INSERT INTO webshells (id,name,url,password,shell_type,status,protocol,created_at) VALUES (?,?,?,?,?,?,?,?)",
-            (wid, name, url, password, shell_type, "active", protocol, now),
+            (wid, name, url, self._encrypt(password), shell_type, "active", protocol, now),
         )
         self._get_conn().commit()
         return {"id": wid, "name": name, "url": url, "shell_type": shell_type, "status": "active", "protocol": protocol}
 
     def list_webshells(self):
         cur = self._get_conn().execute("SELECT * FROM webshells WHERE status != 'deleted' ORDER BY created_at DESC")
-        return [dict(r) for r in cur.fetchall()]
+        rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            r["password"] = self._decrypt(r.get("password", ""))
+        return rows
 
     def update_webshell(self, wid, **kw):
         fields = {k: v for k, v in kw.items() if v is not None}
         if not fields:
             return
+        if fields.get("password"):
+            fields["password"] = self._encrypt(fields["password"])
         sets = ", ".join(f"{k}=?" for k in fields)
         vals = list(fields.values()) + [wid]
         self._get_conn().execute(f"UPDATE webshells SET {sets} WHERE id=?", vals)

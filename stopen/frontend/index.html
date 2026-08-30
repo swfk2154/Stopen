@@ -3,63 +3,79 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Stopen - 自动化渗透测试 Agent</title>
+  <title>Stopen — 自动化渗透测试 Agent</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-      transition: background 0.3s, color 0.3s;
+      transition: background 0.2s, color 0.2s;
     }
-    body.light { background: #f8f9fa; color: #1a1a1a; }
-    body.dark { background: #0f0f0f; color: #e0e0e0; }
+    body.light { background: #f4f5f7; color: #16181d; }
+    body.dark { background: #0b0e13; color: #d5dae2; }
     :root {
       --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-      --radius: 12px;
-      --radius-sm: 6px;
-      --shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06);
-      --shadow-lg: 0 4px 6px rgba(0,0,0,0.1), 0 2px 4px rgba(0,0,0,0.06);
+      --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+      --radius: 5px;
+      --radius-sm: 4px;
+      --shadow: none;
+      --shadow-lg: 0 8px 24px rgba(0,0,0,0.35);
     }
     body.dark {
-      --bg-primary: #0f0f0f;
-      --bg-card: #1a1a1a;
-      --bg-hover: #222222;
-      --bg-sidebar: #111111;
-      --border: #2a2a2a;
-      --text: #e0e0e0;
-      --text-dim: #6b7280;
-      --accent: #7c3aed;
-      --accent-hover: #6d28d9;
-      --accent-light: rgba(124, 58, 237, 0.15);
-      --success: #22c55e;
-      --error: #ef4444;
-      --warning: #f59e0b;
-      --info: #3b82f6;
+      --bg-primary: #0b0e13;
+      --bg-card: #10141b;
+      --bg-secondary: #0e1117;
+      --bg-hover: #161b24;
+      --bg-sidebar: #0d1016;
+      --bg-terminal: #06080c;
+      --border: #1d232e;
+      --border-strong: #2a3240;
+      --text: #d5dae2;
+      --text-dim: #67717f;
+      --text-faint: #4a525e;
+      --accent: #2dd4bf;
+      --accent-hover: #14b8a6;
+      --accent-dim: rgba(45, 212, 191, 0.10);
+      --accent-light: rgba(45, 212, 191, 0.10);
+      --accent-text: #0b0e13;
+      --success: #4ade80;
+      --error: #f87171;
+      --warning: #fbbf24;
+      --info: #7dd3fc;
     }
     body.light {
-      --bg-primary: #f8f9fa;
+      --bg-primary: #f4f5f7;
       --bg-card: #ffffff;
-      --bg-hover: #f3f4f6;
+      --bg-secondary: #fafbfc;
+      --bg-hover: #eef0f3;
       --bg-sidebar: #ffffff;
-      --border: #e5e7eb;
-      --text: #1a1a1a;
-      --text-dim: #6b7280;
-      --accent: #7c3aed;
-      --accent-hover: #6d28d9;
-      --accent-light: rgba(124, 58, 237, 0.1);
+      --bg-terminal: #10141b;
+      --border: #e2e5ea;
+      --border-strong: #cdd2da;
+      --text: #16181d;
+      --text-dim: #6a7280;
+      --text-faint: #9aa2ad;
+      --accent: #0d9488;
+      --accent-hover: #0f766e;
+      --accent-dim: rgba(13, 148, 136, 0.08);
+      --accent-light: rgba(13, 148, 136, 0.08);
+      --accent-text: #ffffff;
       --success: #16a34a;
       --error: #dc2626;
       --warning: #d97706;
-      --info: #2563eb;
+      --info: #0284c7;
     }
     * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
-    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
     a { color: var(--accent); text-decoration: none; }
     input, select, textarea, button { font-family: var(--font); }
+    input:focus-visible, select:focus-visible, textarea:focus-visible {
+      outline: none; border-color: var(--accent) !important;
+    }
   </style>
 </head>
 <body class="dark">

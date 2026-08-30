@@ -31,7 +31,13 @@ def check_aiohttp_python_version():
 
 
 def is_kali():
-    return os.path.isfile("/etc/os-release") and "kali" in open("/etc/os-release").read().lower()
+    if not os.path.isfile("/etc/os-release"):
+        return False
+    try:
+        with open("/etc/os-release", encoding="utf-8", errors="replace") as f:
+            return "kali" in f.read().lower()
+    except OSError:
+        return False
 
 
 def try_apt_install():
@@ -130,13 +136,13 @@ def build_frontend():
         return False
 
     # npm install
-    r1 = subprocess.run(["npm", "install"], cwd=str(frontend_dir), capture_output=True, text=True, timeout=120)
+    r1 = subprocess.run(["npm", "install"], cwd=str(frontend_dir), capture_output=True, text=True, timeout=600)
     if r1.returncode != 0:
         print(f"  npm install 失败")
         return False
 
     # vite build
-    r2 = subprocess.run(["npx", "vite", "build"], cwd=str(frontend_dir), capture_output=True, text=True, timeout=120)
+    r2 = subprocess.run(["npx", "vite", "build"], cwd=str(frontend_dir), capture_output=True, text=True, timeout=300)
     if r2.returncode != 0:
         print(f"  vite build 失败")
         return False

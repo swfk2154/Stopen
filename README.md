@@ -4,6 +4,11 @@
 
 ![Web UI](stopen/TPIAN/Web.png)
 
+> **Disclaimer**: Stopen is intended **only for authorized security testing**
+> (pentest engagements, CTF, security research on systems you own or have
+> explicit permission to test). Do not use it for any illegal purpose. The
+> authors are not liable for any misuse.
+
 ---
 
 ## 1. Quick Start
@@ -38,7 +43,7 @@ npx vite build
 cd ../..
 ```
 
-> Pre-built frontend is included in the repo — this step is usually not needed.
+> Pre-built frontend is tracked in the repo — this step is usually not needed.
 
 ### 1.1 Start Backend
 
@@ -50,28 +55,19 @@ python run.py
 | Argument | Description |
 |----------|-------------|
 | `--port 8081` | Custom port (default: 8080) |
-| `--host 0.0.0.0` | Listen on all interfaces for LAN access |
+| `--host 0.0.0.0` | Listen on all interfaces for LAN access (default) |
+| `--host 127.0.0.1` | Localhost only |
 | `--no-reload` | Disable hot reload |
 
 Environment variable: `$env:STOPEN_PORT=8081`
-
-> Security note: Default listen address is `127.0.0.1` (localhost only). Use `--host 0.0.0.0` for LAN access.
-> Only expose to trusted networks as authentication is basic.
 
 ### 1.2 Access WebUI
 
 Open browser → `http://localhost:8080`
 
-### 1.3 CLI Terminal
-
-```powershell
-python cli.py                 # Interactive REPL mode
-python cli.py run 192.168.1.1 # One-key penetration test
-python cli.py status          # System status
-python cli.py --port 8081     # Specify backend port
-```
-
-![CLI Interface](stopen/TPIAN/Cli.png)
+Local access is authenticated automatically. When accessing from another
+machine over LAN, the UI shows a login panel — paste the token from
+`stopen/storage/.auth_secret` on the server.
 
 ---
 
@@ -121,18 +117,37 @@ WebUI → **MCP Configuration** → Add server
 
 Nav → **Chat**
 
-Multi-turn LLM conversation interface:
+Multi-turn LLM conversation interface with full streaming:
 
+- **Streaming output**: tokens appear in real time via SSE
+- **Reasoning visibility**: thinking-model reasoning (`reasoning_content` from
+  DeepSeek-R1 / GLM-Thinking / Qwen-Thinking etc.) streams into a collapsible
+  "思考过程" block
+- **Tool calls in chat**: the assistant can invoke registered security tools
+  (port scan, HTTP request, CVE query, codec...) mid-conversation; each call
+  shows a compact card with arguments and output (max 8 tool rounds)
 - **Multi-turn**: Context preserved across continuous Q&A
 - **Model selector**: Dropdown showing only configured & enabled models
-- **Conversation management**:
-  - Sidebar lists all conversations
-  - "New Conversation" button to create
-  - Click to switch, × to delete
-- **Message bubbles**: User purple right-aligned, AI gray left-aligned
+- **Conversation management**: sidebar list, create / switch / delete
 - **Send**: Enter to send, Shift+Enter for new line
 
-> Chat bypasses the OODA Agent loop — suitable for general Q&A and consulting.
+> Chat runs a lightweight tool loop (not the full OODA blackboard cycle) —
+> suitable for Q&A, consulting, and quick assisted checks.
+
+### 3.1.1 Dashboard
+
+Nav → **Dashboard**
+
+Aggregated stats view (`/api/stats`): tasks, vulnerabilities by severity,
+active C2 sessions, listeners, webshells, conversations, skills, and tools —
+with quick actions and system/MCP status cards.
+
+### 3.1.2 Skills Library
+
+Nav → **Skills Library**
+
+Browse the built-in pentest/CTF knowledge base (`stopen/skills/*.md`) with a
+reader pane; the same skill files are injected into Agent prompts by task type.
 
 ### 3.2 Agent Console
 
@@ -369,33 +384,22 @@ Nav → **Roles**
 
 ### 3.10 Theme Switcher
 
-Sidebar bottom button: ☀️ Light / 🌙 Dark mode. Persists via localStorage across page refreshes.
+Sidebar bottom: Light / Dark mode toggle. Persists via localStorage across page refreshes.
 
 ---
 
-## 4. CLI Commands
+## 4. Testing
 
-| Command | Arguments | Description |
-|---------|-----------|-------------|
-| `target` | `<host>` | Set penetration target |
-| `goal` | `<description>` | Set goal description |
-| `run` | `[target]` | Full automated penetration test |
-| `recon` | `[target]` | Information gathering |
-| `scan` | `[target]` | Vulnerability scanning |
-| `exploit` | `[target]` | Exploitation |
-| `tools` | — | List all available tools |
-| `status` | — | System status (blackboard, tools, MCP) |
-| `listeners` | — | C2 listener list |
-| `sessions` | — | Active C2 sessions |
-| `webshells` | — | WebShell list |
-| `vulns` | — | Vulnerability list |
-| `config providers` | — | LLM provider status |
-| `think` | `on/off` | Toggle thinking display |
-| `health` | — | Check backend connection |
-| `help` | — | Show help |
-| `exit` / `q` | — | Exit |
+```powershell
+pip install -r requirements-dev.txt
+pytest
+```
 
-Any natural language input automatically routes to LLM chat.
+The suite (56 tests) covers the auth middleware (including the loopback-only
+token endpoint regression), SQLite thread safety, webshell password encryption
+at rest, config encryption, report/PoC generation, OODA helpers
+(anti-hallucination gate, failure classification), LLM client streaming
+parsing, and the chat tool-loop engine.
 
 ---
 
@@ -404,17 +408,20 @@ Any natural language input automatically routes to LLM chat.
 ```
 Stopen/
 ├── run.py                    # Backend entry (supports --port/--host)
-├── cli.py                    # CLI terminal (interactive + single-command)
 ├── install.py                # One-click install script (pip deps + storage/ init)
+├── pytest.ini                # Test configuration
+├── requirements.txt          # Runtime dependencies
+├── requirements-dev.txt      # Dev/test dependencies (pytest)
 ├── .gitignore                # Git exclusion rules
 ├── README.md                 # English documentation
 ├── README_CN.md              # Chinese documentation
+├── tests/                    # pytest suite (auth/db/crypto/chat engine/...)
 ├── stopen/
-│   ├── main.py               # FastAPI app + route registration + tool init
+│   ├── main.py               # FastAPI app + lifespan + /api/stats + logs
 │   ├── app_config/           # Configuration module
 │   │   ├── encryption.py     # AES (Fernet) API key encryption
 │   │   ├── providers.py      # 12 LLM provider definitions
-│   │   ├── auth.py           # Bearer Token auth middleware
+│   │   ├── auth.py           # Bearer Token auth (token endpoint loopback-only)
 │   │   ├── settings.py       # Global constants
 │   │   └── logging_config.py # Logging setup
 │   ├── models/               # Pydantic data models
@@ -425,22 +432,23 @@ Stopen/
 │   ├── routes/ (11 modules)  # FastAPI route modules
 │   │   ├── agent.py          # OODA Agent SSE streaming
 │   │   ├── c2.py             # C2 listener/session/payload CRUD
-│   │   ├── chat.py           # Chat API (LLM direct, no Agent loop)
+│   │   ├── chat.py           # Chat API + SSE streaming (reasoning/tools)
 │   │   ├── config.py         # LLM provider config CRUD + test
 │   │   ├── mcp_config.py     # MCP server CRUD + stdio support
 │   │   ├── roles.py          # Role CRUD (built-in + custom)
 │   │   ├── tasks.py          # Task management + report/PoC
 │   │   ├── tools.py          # Tool listing + MCP status
 │   │   ├── vulnerabilities.py# Vulnerability CRUD + stats
-│   │   ├── webshell.py       # WebShell + file operation API
+│   │   ├── webshell.py       # WebShell + file operation API (masked passwords)
 │   │   └── yaml_tools.py     # Custom YAML tool CRUD + reload
 │   ├── services/             # Business logic layer
 │   │   ├── agent_loop_ooda.py # OODA core loop engine
+│   │   ├── chat_engine.py     # Streaming chat with reasoning + tool loop
 │   │   ├── blackboard.py      # Blackboard (Fact/Intent/Goal)
 │   │   ├── c2_service.py      # C2 engine (listener/encryption/payload)
 │   │   ├── webshell_service.py# 3-protocol WebShell
-│   │   ├── db_service.py      # SQLite (13 tables)
-│   │   ├── llm_client.py      # LLM HTTP client (OpenAI/Anthropic)
+│   │   ├── db_service.py      # SQLite (13 tables, per-thread connections)
+│   │   ├── llm_client.py      # LLM HTTP client (OpenAI/Anthropic, streaming)
 │   │   ├── llm_service.py     # LLM service wrapper
 │   │   ├── report_service.py  # Report + PoC generation
 │   │   ├── skills_service.py  # Skill file loader
@@ -455,11 +463,11 @@ Stopen/
 │   │       ├── mcp_bridge.py  # MCP bridge (HTTP + Stdio)
 │   │       └── yaml_loader.py # YAML custom tool loader
 │   ├── frontend/             # React SPA frontend
-│   │   ├── index.html         # Dual-theme CSS + Inter font
+│   │   ├── index.html         # Dual-theme design tokens (Inter + JetBrains Mono)
 │   │   ├── src/
 │   │   │   ├── main.jsx       # React entry
-│   │   │   └── App.jsx        # Full SPA (~800 lines, 11 pages)
-│   │   └── dist/              # Vite build output (gitignored)
+│   │   │   └── App.jsx        # Full SPA (12 pages, SVG icon set, login overlay)
+│   │   └── dist/              # Vite build output (tracked in repo)
 │   ├── skills/ (8 files)     # Pentest knowledge base (.md)
 │   │   ├── recon.md           # Reconnaissance methodology
 │   │   ├── vuln_discovery.md  # Vulnerability discovery methodology
@@ -471,7 +479,6 @@ Stopen/
 │   │   └── ctf_reverse.md     # CTF reverse engineering guide
 │   ├── TPIAN/                # Screenshots
 │   │   ├── Web.png            # WebUI homepage screenshot
-│   │   ├── Cli.png            # CLI terminal screenshot
 │   │   └── Webshell-web.png   # WebShell page screenshot
 │   └── storage/              # Runtime data (.gitignored)
 │       ├── stopen.db          # SQLite main database
@@ -519,14 +526,20 @@ python run.py --port 8081
 ## 7. Security
 
 1. **API Key encrypted storage**: Fernet (AES) symmetric encryption on disk, never plaintext
-2. **Auth**: All `/api/*` routes (except `/api/health`, `/api/auth/*`) require Bearer Token, auto-generated at `storage/.auth_secret`
-3. **CORS**: Whitelist — localhost only (no wildcard)
-4. **Default listen**: `127.0.0.1` only, LAN requires explicit `--host 0.0.0.0`
-5. **C2 communication**: AES-256-CTR / XOR encryption (per-listener key)
-6. **C2 secrets**: Automatically masked as `****` in API responses
-7. **WebShell passwords**: Stored in plaintext in SQLite — restrict `storage/` directory access
-8. **`.gitignore`**: Excludes `*.db`, `*.enc`, `*.key`, `logs/`, `reports/`, `.auth_secret`
-9. **YAML tools / MCP Stdio**: Command passed directly to subprocess — ensure commands are trustworthy
+2. **Auth**: All `/api/*` routes (except `/api/health`) require Bearer Token (constant-time compare), auto-generated at `storage/.auth_secret`
+3. **Token endpoint is loopback-only**: `/api/auth/config` refuses remote clients — LAN visitors must paste the token into the login panel; it can no longer be fetched anonymously
+4. **CORS**: Whitelist — localhost only (no wildcard)
+5. **Default listen**: `0.0.0.0` (LAN accessible by default). Use `--host 127.0.0.1` to restrict to localhost; remote access always requires the token
+6. **C2 communication**: AES-256-CTR / XOR encryption (per-listener key)
+7. **C2 secrets**: Automatically masked as `****` in API responses
+8. **WebShell passwords**: AES-encrypted at rest in SQLite (shared `keyfile.key`), masked as `****` in list APIs; legacy plaintext rows are migrated transparently on read
+9. **`.gitignore`**: Excludes `*.db`, `*.enc`, `*.key`, `logs/`, `reports/`, `.auth_secret`
+10. **YAML tools / MCP Stdio**: Command passed directly to subprocess — ensure commands are trustworthy
+
+> Antivirus note: C2/WebShell modules (`c2_service.py`, `webshell_service.py`)
+> may be flagged by Windows Defender or other AV and quarantined. If files
+> disappear after a commit, add the project folder to your AV exclusion list
+> and restore with `git checkout -- <file>`.
 
 ---
 
@@ -577,8 +590,8 @@ L4: Obfuscation/change attack surface
 
 1. **WebSocket payload encryption incompatibility**: Python WS Payload uses AES-256-CTR, but server `_start_ws()` may have mismatched decryption. Test before production use.
 2. **No HTTPS/WSS support**: HTTP and WebSocket listeners support plaintext only. Use a reverse proxy (e.g. Nginx) for TLS termination in production.
-3. **SQLite single connection**: Uses one connection — may bottleneck under high concurrency. Acceptable for single-user use.
-4. **No rate limiting**: All API endpoints currently have no rate limiting.
+3. **No rate limiting**: All API endpoints currently have no rate limiting.
+4. **Anthropic tool-loop**: Anthropic-native models do not support the chat tool loop yet (OpenAI-compatible endpoints only).
 
 ---
 

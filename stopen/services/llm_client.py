@@ -22,7 +22,8 @@ def _ns(**kw):
 
 def _split_model(model: str):
     if "/" in model:
-        return model.split("/", 1)
+        provider, name = model.split("/", 1)
+        return provider, name
     return "openai", model
 
 
@@ -77,6 +78,11 @@ def _build_response(data: dict):
 
 
 async def _stream_openai(resp: httpx.Response) -> AsyncGenerator:
+    """OpenAI 兼容流式解析。
+
+    delta 透传 content / role / reasoning_content（思考模型）/ tool_calls 增量分片，
+    供上层做思考过程展示与工具调用聚合。
+    """
     async for line in resp.aiter_lines():
         if not line.startswith("data: "):
             continue
@@ -85,10 +91,27 @@ async def _stream_openai(resp: httpx.Response) -> AsyncGenerator:
             break
         try:
             chunk = json.loads(data)
-            delta = chunk.get("choices", [{}])[0].get("delta", {})
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            raw_delta = choices[0].get("delta") or {}
+            tc_frags = []
+            for tc in raw_delta.get("tool_calls") or []:
+                func = tc.get("function") or {}
+                tc_frags.append(_ns(
+                    index=tc.get("index", 0),
+                    id=tc.get("id"),
+                    name=func.get("name"),
+                    arguments=func.get("arguments"),
+                ))
             yield _ns(choices=[_ns(
                 index=0,
-                delta=_ns(content=delta.get("content"), role=delta.get("role")),
+                delta=_ns(
+                    content=raw_delta.get("content"),
+                    role=raw_delta.get("role"),
+                    reasoning_content=raw_delta.get("reasoning_content") or raw_delta.get("reasoning"),
+                    tool_calls=tc_frags or None,
+                ),
                 message=_ns(content=None, role=None, tool_calls=None),
             )])
         except (json.JSONDecodeError, IndexError, KeyError):

@@ -2,20 +2,80 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 
 const API = '/api'
 
+// ── SVG 图标（1.6px 线性风格）──
+const ICON_PATHS = {
+  dashboard: <><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></>,
+  chat: <path d="M21 12a8 8 0 0 1-8 8H4l2.5-2.5A8 8 0 1 1 21 12z" />,
+  agent: <><polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" /></>,
+  c2: <><circle cx="12" cy="12" r="3" /><path d="M12 2v4M12 18v4M2 12h4M18 12h4" /></>,
+  webshell: <><polyline points="8 6 3 12 8 18" /><polyline points="16 6 21 12 16 18" /></>,
+  vulns: <path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6l7-3z" />,
+  yaml: <path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18v3h3l5.7-5.7a4.5 4.5 0 0 0 6-6L14 13l-3-3 3.7-3.7z" />,
+  skills: <path d="M4 19V5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2zm0 0a2 2 0 0 0 2 2h13" />,
+  tasks: <><path d="M4 6h2M4 12h2M4 18h2" /><path d="M10 6h10M10 12h10M10 18h10" /></>,
+  mcp: <><path d="M9 7V3M15 7V3" /><path d="M7 7h10v4a5 5 0 0 1-10 0V7z" /><path d="M12 16v5" /></>,
+  roles: <><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4 3.5-6 8-6s8 2 8 6" /></>,
+  config: <><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1" /></>,
+  sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" /></>,
+  moon: <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z" />,
+  logout: <><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" /></>,
+}
+
+function Icon({ name, size = 16, style }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, ...style }}>
+      {ICON_PATHS[name]}
+    </svg>
+  )
+}
+
 // ── Auth Token ──
+// 本机访问：/api/auth/config 自动发 token，无感登录
+// 远程访问：该接口仅限本机，401 后弹出登录面板，token 存 localStorage
 let _tokenPromise = null
+let _loginResolver = null
+
+function _promptToken() {
+  window.dispatchEvent(new Event('stopen-login-required'))
+  return new Promise(resolve => { _loginResolver = resolve })
+}
+
+async function _fetchToken() {
+  try {
+    const r = await fetch('/api/auth/config')
+    if (r.ok) {
+      const d = await r.json()
+      if (d.token) return d.token
+    }
+  } catch (e) { /* ignore */ }
+  const saved = localStorage.getItem('stopen-token')
+  if (saved) return saved
+  return _promptToken()
+}
+
 async function _getToken() {
-  if (_tokenPromise) return _tokenPromise
-  _tokenPromise = fetch('/api/auth/config').then(r => r.json()).then(d => d.token || '').catch(() => '')
+  if (!_tokenPromise) _tokenPromise = _fetchToken()
   return _tokenPromise
 }
 
+function _resolveLogin(token) {
+  if (_loginResolver) { _loginResolver(token); _loginResolver = null }
+}
+
 // ── 带认证的 fetch ──
-async function api(url, opts = {}) {
+async function api(url, opts = {}, _retried = false) {
   const token = await _getToken()
   const headers = { ...opts.headers }
   if (token && !headers['Authorization']) headers['Authorization'] = `Bearer ${token}`
-  return fetch(url, { ...opts, headers })
+  const res = await fetch(url, { ...opts, headers })
+  if (res.status === 401 && !_retried) {
+    // token 失效：清掉缓存重新登录一次
+    localStorage.removeItem('stopen-token')
+    _tokenPromise = null
+    return api(url, opts, true)
+  }
+  return res
 }
 
 // ── Theme ──
@@ -25,6 +85,62 @@ function setTheme(t) {
   document.body.className = t
 }
 
+// ── 登录浮层（远程访问认证）──
+function LoginOverlay() {
+  const [open, setOpen] = useState(false)
+  const [value, setValue] = useState('')
+  const [error, setError] = useState('')
+  useEffect(() => {
+    const handler = () => { setOpen(true); setError(''); setValue(localStorage.getItem('stopen-token') || '') }
+    window.addEventListener('stopen-login-required', handler)
+    return () => window.removeEventListener('stopen-login-required', handler)
+  }, [])
+  if (!open) return null
+  const submit = () => {
+    const t = value.trim()
+    if (!t) { setError('请输入 Token'); return }
+    localStorage.setItem('stopen-token', t)
+    setOpen(false)
+    _resolveLogin(t)
+  }
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center',
+      background: 'rgba(4,6,10,0.78)', backdropFilter: 'blur(3px)',
+    }}>
+      <div style={{
+        width: 380, background: 'var(--bg-card)', border: '1px solid var(--border-strong)',
+        borderRadius: 'var(--radius)', boxShadow: 'var(--shadow-lg)', padding: '32px 32px 28px',
+      }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 600, letterSpacing: 2 }}>STOPEN</div>
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.12em', margin: '6px 0 24px' }}>Access Control / 访问认证</div>
+        <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8 }}>远程访问需要输入认证 Token</div>
+        <div style={{ fontSize: 11, color: 'var(--text-faint)', fontFamily: 'var(--font-mono)', marginBottom: 14 }}>
+          位置: stopen/storage/.auth_secret
+        </div>
+        <input autoFocus type="password" value={value} placeholder="Paste token here"
+          onChange={e => { setValue(e.target.value); setError('') }}
+          onKeyDown={e => e.key === 'Enter' && submit()}
+          style={{
+            width: '100%', background: 'var(--bg-secondary)', border: '1px solid var(--border-strong)',
+            color: 'var(--text)', padding: '10px 12px', borderRadius: 'var(--radius-sm)',
+            fontSize: 13, fontFamily: 'var(--font-mono)', outline: 'none',
+          }} />
+        {error && <div style={{ color: 'var(--error)', fontSize: 12, marginTop: 8 }}>{error}</div>}
+        <button onClick={submit} style={{
+          marginTop: 18, width: '100%', border: 'none', cursor: 'pointer',
+          background: 'var(--accent)', color: 'var(--accent-text)',
+          padding: '10px 0', borderRadius: 'var(--radius-sm)', fontSize: 13, fontWeight: 600,
+        }}>连接 CONNECT</button>
+        <button onClick={() => { setOpen(false); _resolveLogin('') }} style={{
+          marginTop: 8, width: '100%', background: 'transparent', border: 'none',
+          color: 'var(--text-dim)', fontSize: 12, cursor: 'pointer', padding: 4,
+        }}>取消</button>
+      </div>
+    </div>
+  )
+}
+
 // ── Layout ──
 function Layout({ children, active, setActive }) {
   const [theme, setThemeState] = useState(getTheme())
@@ -32,64 +148,115 @@ function Layout({ children, active, setActive }) {
     const next = theme === 'dark' ? 'light' : 'dark'
     setThemeState(next); setTheme(next)
   }
+  const logout = () => {
+    localStorage.removeItem('stopen-token')
+    _tokenPromise = null
+    window.dispatchEvent(new Event('stopen-login-required'))
+  }
   const nav = [
-    { id: 'dashboard', label: '仪表盘', icon: '📊' },
-    { id: 'chat', label: '对话', icon: '💬' },
-    { id: 'agent', label: 'Agent', icon: '🤖' },
-    { id: 'c2', label: 'C2 面板', icon: '🔗' },
-    { id: 'webshell', label: 'WebShell', icon: '💻' },
-    { id: 'vulns', label: '漏洞', icon: '🛡️' },
-    { id: 'yaml', label: '自定义工具', icon: '🔧' },
-    { id: 'tasks', label: '任务', icon: '📋' },
-    { id: 'mcp', label: 'MCP 配置', icon: '🔌' },
-    { id: 'roles', label: '角色', icon: '👤' },
-    { id: 'config', label: '配置', icon: '⚙️' },
+    { id: 'dashboard', label: '仪表盘', icon: 'dashboard' },
+    { id: 'chat', label: '对话', icon: 'chat' },
+    { id: 'agent', label: 'Agent', icon: 'agent' },
+    { id: 'c2', label: 'C2 面板', icon: 'c2' },
+    { id: 'webshell', label: 'WebShell', icon: 'webshell' },
+    { id: 'vulns', label: '漏洞', icon: 'vulns' },
+    { id: 'yaml', label: '自定义工具', icon: 'yaml' },
+    { id: 'skills', label: '技能库', icon: 'skills' },
+    { id: 'tasks', label: '任务', icon: 'tasks' },
+    { id: 'mcp', label: 'MCP 配置', icon: 'mcp' },
+    { id: 'roles', label: '角色', icon: 'roles' },
+    { id: 'config', label: '配置', icon: 'config' },
   ]
   return (
     <div style={{ display: 'flex', minHeight: '100vh', background: 'var(--bg-primary)', color: 'var(--text)' }}>
       <nav style={{
-        width: 180, background: 'var(--bg-sidebar)', borderRight: '1px solid var(--border)',
-        display: 'flex', flexDirection: 'column', justifyContent: 'space-between', padding: '16px 0',
+        width: 188, background: 'var(--bg-sidebar)', borderRight: '1px solid var(--border)',
+        display: 'flex', flexDirection: 'column', justifyContent: 'space-between', padding: '14px 0 10px',
+        position: 'sticky', top: 0, height: '100vh', overflowY: 'auto',
       }}>
         <div>
-          <h2 style={{ fontSize: 20, fontWeight: 700, padding: '0 16px', marginBottom: 24, color: 'var(--accent)', letterSpacing: -0.5 }}>Stopen</h2>
+          <div style={{ padding: '4px 16px 0' }}>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 17, fontWeight: 600, letterSpacing: 2, color: 'var(--text)' }}>STOPEN</div>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 9, color: 'var(--text-faint)', letterSpacing: '0.14em', marginTop: 2 }}>AUTOPENTEST AGENT</div>
+          </div>
+          <div style={{ height: 1, background: 'var(--border)', margin: '12px 16px 10px' }} />
           {nav.map(n => (
             <div key={n.id} onClick={() => setActive(n.id)}
               style={{
-                padding: '10px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
-                fontSize: 14, fontWeight: active === n.id ? 600 : 400,
+                padding: '7px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
+                fontSize: 13, fontWeight: active === n.id ? 600 : 400,
                 color: active === n.id ? 'var(--accent)' : 'var(--text-dim)',
-                background: active === n.id ? 'var(--accent-light)' : 'transparent',
-                borderLeft: active === n.id ? '3px solid var(--accent)' : '3px solid transparent',
-                transition: 'all 0.15s',
+                background: active === n.id ? 'var(--accent-dim)' : 'transparent',
+                borderLeft: active === n.id ? '2px solid var(--accent)' : '2px solid transparent',
+                transition: 'all 0.12s',
               }}>
-              <span>{n.icon}</span><span>{n.label}</span>
+              <Icon name={n.icon} size={15} />
+              <span>{n.label}</span>
             </div>
           ))}
         </div>
-        <div onClick={toggle} style={{
-          padding: '10px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8,
-          fontSize: 13, color: 'var(--text-dim)', borderTop: '1px solid var(--border)', margin: '0 12px', paddingTop: 12,
-        }}>
-          <span>{theme === 'dark' ? '☀️' : '🌙'}</span>
-          <span>{theme === 'dark' ? '亮色模式' : '暗色模式'}</span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <div onClick={toggle} style={{
+            padding: '7px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
+            fontSize: 12.5, color: 'var(--text-dim)', borderTop: '1px solid var(--border)', margin: '8px 0 0',
+          }}>
+            <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={14} />
+            <span>{theme === 'dark' ? '亮色模式' : '暗色模式'}</span>
+          </div>
+          <div onClick={logout} style={{
+            padding: '7px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
+            fontSize: 12.5, color: 'var(--text-faint)',
+          }}>
+            <Icon name="logout" size={14} />
+            <span>重新认证</span>
+          </div>
         </div>
       </nav>
-      <main style={{ flex: 1, padding: 24, overflow: 'auto', maxHeight: '100vh' }}>{children}</main>
+      <main style={{ flex: 1, padding: '24px 28px', overflow: 'auto', maxHeight: '100vh' }}>{children}</main>
     </div>
   )
 }
 
 // ── Dashboard ──
 function Dashboard({ setActive }) {
-  const [health, setHealth] = useState(null); const [tools, setTools] = useState(null)
+  const [health, setHealth] = useState(null)
+  const [tools, setTools] = useState(null)
+  const [stats, setStats] = useState(null)
   useEffect(() => {
     api(`${API}/health`).then(r => r.json()).then(setHealth)
     api(`${API}/tools`).then(r => r.json()).then(setTools)
+    api(`${API}/stats`).then(r => r.json()).then(setStats)
   }, [])
+  const sevColors = { critical: 'var(--error)', high: '#fb923c', medium: 'var(--warning)', low: 'var(--info)', info: 'var(--text-dim)' }
+  const statTile = (label, value, color, onClick) => (
+    <div onClick={onClick} style={{
+      background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 'var(--radius)',
+      padding: '14px 16px 12px', cursor: onClick ? 'pointer' : 'default',
+      transition: 'border-color 0.12s',
+    }}
+      onMouseEnter={e => { if (onClick) e.currentTarget.style.borderColor = 'var(--border-strong)' }}
+      onMouseLeave={e => { if (onClick) e.currentTarget.style.borderColor = 'var(--border)' }}>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 24, fontWeight: 600, color: color || 'var(--text)', lineHeight: 1.1 }}>{value}</div>
+      <div style={{ fontSize: 10.5, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.1em', marginTop: 6 }}>{label}</div>
+    </div>
+  )
   return (
     <div>
-      <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 24, letterSpacing: -0.5 }}>仪表盘</h1>
+      <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 20, letterSpacing: -0.3 }}>仪表盘</h1>
+      {stats && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 16 }}>
+        {statTile('任务', stats.tasks?.total ?? '-', 'var(--accent)', () => setActive('tasks'))}
+        {statTile('漏洞', stats.vulnerabilities?.total ?? '-', 'var(--error)', () => setActive('vulns'))}
+        {statTile('C2 会话', stats.sessions?.active ?? '-', 'var(--success)', () => setActive('c2'))}
+        {statTile('监听器', stats.listeners?.total ?? '-', null, () => setActive('c2'))}
+        {statTile('WebShell', stats.webshells?.total ?? '-', null, () => setActive('webshell'))}
+        {statTile('对话', stats.conversations?.total ?? '-', null, () => setActive('chat'))}
+        {statTile('技能', stats.skills?.total ?? '-', null, () => setActive('skills'))}
+        {statTile('工具', stats.tools?.total ?? '-', null, () => setActive('yaml'))}
+      </div>}
+      {stats?.vulnerabilities && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 12, marginBottom: 16 }}>
+        {Object.entries(stats.vulnerabilities.by_severity || {}).map(([sev, cnt]) =>
+          statTile(`${sev.toUpperCase()} 漏洞`, cnt, sevColors[sev] || 'var(--text)', () => setActive('vulns')))}
+      </div>}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 16 }}>
         <Card title="系统状态">
           {health ? <div>
@@ -114,17 +281,18 @@ function Dashboard({ setActive }) {
             </div>
           )) : <Loading />}
         </Card>
-        <Card title="工具">
-          {tools ? <div>
-            <div style={{ fontSize: 32, fontWeight: 700, color: 'var(--accent)' }}>{tools.count}</div>
-            <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>已注册工具</div>
+        <Card title="任务状态">
+          {stats ? <div style={{ fontSize: 13 }}>
+            <div>运行中: <span style={{ color: 'var(--success)' }}>{stats.tasks?.running ?? 0}</span> / {stats.tasks?.total ?? 0}</div>
+            <div style={{ marginTop: 4 }}>C2 监听: <span style={{ color: stats.listeners?.running ? 'var(--success)' : 'var(--text-dim)' }}>{stats.listeners?.running ?? 0}</span> / {stats.listeners?.total ?? 0}</div>
+            <div style={{ marginTop: 4 }}>WebShell 活跃: {stats.webshells?.active ?? 0} / {stats.webshells?.total ?? 0}</div>
           </div> : <Loading />}
         </Card>
         <Card title="快速操作">
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <Button onClick={() => setActive('agent')}>🤖 启动 Agent</Button>
-            <Button onClick={() => setActive('c2')}>🔗 C2 管理</Button>
-            <Button onClick={() => setActive('webshell')}>💻 WebShell</Button>
+            <Button onClick={() => setActive('agent')}>启动 Agent</Button>
+            <Button onClick={() => setActive('c2')}>C2 管理</Button>
+            <Button onClick={() => setActive('webshell')}>WebShell</Button>
           </div>
         </Card>
       </div>
@@ -182,7 +350,7 @@ function ChatPage() {
   const loadMessages = async (cid) => {
     setActiveConv(cid)
     const d = await api(`${API}/chat/conversations/${cid}`).then(r => r.json())
-    setMessages(d.messages || [])
+    setMessages((d.messages || []).map(normalizeMessage))
   }
 
   const sendMsg = async () => {
@@ -190,25 +358,40 @@ function ChatPage() {
     const text = input.trim()
     setInput('')
     setMessages(prev => [...prev, { role: 'user', content: text }])
+    const aid = `stream-${Date.now()}`
+    setMessages(prev => [...prev, { id: aid, role: 'assistant', content: '', reasoning: '', tools: [], streaming: true }])
     setSending(true)
+    const patch = fn => setMessages(prev => prev.map(m => m.id === aid ? fn(m) : m))
     try {
-      const resp = await api(`${API}/chat/conversations/${activeConv}/messages`, {
+      const resp = await api(`${API}/chat/conversations/${activeConv}/stream`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          content: text, role: 'user', use_agent: true,
-          model: selectedModel || undefined,
-        }),
+        body: JSON.stringify({ content: text, model: selectedModel || undefined, use_tools: true }),
       })
-      const data = await resp.json()
-      if (data.assistant) {
-        setMessages(prev => [...prev, { role: 'assistant', content: data.assistant }])
-      } else if (data.error) {
-        setMessages(prev => [...prev, { role: 'assistant', content: `[错误] ${data.error}` }])
+      const reader = resp.body.getReader(); const decoder = new TextDecoder()
+      let buf = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n'); buf = lines.pop() || ''
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const data = line.slice(6)
+          if (data === '[DONE]') continue
+          let ev; try { ev = JSON.parse(data) } catch { continue }
+          if (ev.type === 'token') patch(m => ({ ...m, content: m.content + ev.text }))
+          else if (ev.type === 'reasoning') patch(m => ({ ...m, reasoning: m.reasoning + ev.text }))
+          else if (ev.type === 'tool_call') patch(m => ({ ...m, tools: [...(m.tools || []), { name: ev.name, arguments: ev.arguments, output: '', success: null }] }))
+          else if (ev.type === 'tool_result') patch(m => ({ ...m, tools: (m.tools || []).map((t, i) => i === m.tools.length - 1 ? { ...t, output: ev.output, success: ev.success } : t) }))
+          else if (ev.type === 'error') patch(m => ({ ...m, content: m.content + `\n[错误] ${ev.text}` }))
+          else if (ev.type === 'done') patch(m => ({ ...m, streaming: false }))
+        }
       }
     } catch (e) {
-      setMessages(prev => [...prev, { role: 'assistant', content: `[错误] ${e.message}` }])
+      patch(m => ({ ...m, content: m.content + `\n[错误] ${e.message}` }))
     }
     setSending(false)
+    patch(m => ({ ...m, streaming: false }))
     loadConvs()
   }
 
@@ -235,7 +418,7 @@ function ChatPage() {
       {/* 对话列表 */}
       <div style={{ width: 240, background: 'var(--bg-card)', borderRadius: 'var(--radius)', padding: 12, border: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 8 }}>
         <h3 style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-dim)', margin:0 }}>对话列表</h3>
-        <button onClick={createConv} style={{ ...btnStyle, background: 'var(--accent)', padding: '8px 12px', fontSize: 13, width: '100%' }}>➕ 新建对话</button>
+        <button onClick={createConv} style={{ ...btnStyle, background: 'var(--accent)', color: 'var(--accent-text)', padding: '8px 12px', fontSize: 13, width: '100%' }}>+ 新建对话</button>
         <div style={{ flex: 1, overflow: 'auto' }}>
           {convs.map(c => (
             <div key={c.id} onClick={() => loadMessages(c.id)}
@@ -268,32 +451,95 @@ function ChatPage() {
             </span>
           </div>
           <div style={{ flex: 1, padding: 16, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {messages.map((m, i) => (
-              <div key={i} style={{
-                alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-                maxWidth: '80%',
-                background: m.role === 'user' ? 'var(--accent)' : 'var(--bg-hover)',
-                color: m.role === 'user' ? '#fff' : 'var(--text)',
-                borderRadius: 12, padding: '10px 14px', fontSize: 14, lineHeight: 1.5,
-                whiteSpace: 'pre-wrap',
-              }}>
-                {m.content}
-              </div>
-            ))}
-            {sending && <div style={{ color: 'var(--text-dim)', fontSize: 13, alignSelf: 'flex-start' }}>思考中...</div>}
+            {messages.map((m, i) => <MessageBubble key={i} msg={m} />)}
+            {sending && <div style={{ color: 'var(--text-dim)', fontSize: 12, fontFamily: 'var(--font-mono)', alignSelf: 'flex-start' }}>思考中...</div>}
             <div ref={msgEnd} />
           </div>
           <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', display: 'flex', gap: 8 }}>
             <input value={input} onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), sendMsg())}
-              placeholder="输入消息（Enter 发送）" style={{ ...inputStyle, flex: 1 }} />
+              placeholder="输入消息（Enter 发送 / Shift+Enter 换行）" style={{ ...inputStyle, flex: 1 }} />
             <button onClick={sendMsg} disabled={sending || !activeConv}
-              style={{ ...btnStyle, background: 'var(--accent)', opacity: (!sending && activeConv) ? 1 : 0.5 }}>发送</button>
+              style={{ ...btnStyle, background: 'var(--accent)', color: 'var(--accent-text)', opacity: (!sending && activeConv) ? 1 : 0.5 }}>发送</button>
           </div>
         </> : <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontSize: 16 }}>
-          💬 选择或创建一个对话开始
+          选择或创建一个对话开始
         </div>}
       </div>
+    </div>
+  )
+}
+
+// ── Chat 消息组件 ──
+// 兼容两种存储格式：纯文本 / JSON 信封 {content, reasoning, tool_calls}
+function normalizeMessage(m) {
+  if (m.role !== 'assistant' || typeof m.content !== 'string' || !m.content.startsWith('{')) return m
+  try {
+    const obj = JSON.parse(m.content)
+    if (obj && typeof obj === 'object' && 'content' in obj) {
+      return { ...m, content: obj.content || '', reasoning: obj.reasoning || '', tools: obj.tool_calls || [] }
+    }
+  } catch (e) { /* 纯文本 */ }
+  return m
+}
+
+function ReasoningBlock({ text, live }) {
+  const [open, setOpen] = useState(!!live)
+  useEffect(() => { if (live) setOpen(true) }, [live])
+  if (!text) return null
+  return (
+    <div style={{ marginBottom: 8, border: '1px dashed var(--border)', borderRadius: 'var(--radius-sm)', background: 'var(--bg-secondary)' }}>
+      <div onClick={() => setOpen(o => !o)} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', cursor: 'pointer', fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', userSelect: 'none' }}>
+        <span style={{ display: 'inline-block', transform: open ? 'rotate(90deg)' : 'none', transition: 'transform 0.12s' }}>▸</span>
+        思考过程 {live && <span style={{ color: 'var(--accent)' }}>▍</span>}
+      </div>
+      {open && <div style={{ padding: '2px 12px 10px', fontSize: 12, color: 'var(--text-dim)', whiteSpace: 'pre-wrap', lineHeight: 1.6, fontFamily: 'var(--font-mono)' }}>{text}</div>}
+    </div>
+  )
+}
+
+function ToolCallCard({ tool }) {
+  const [open, setOpen] = useState(false)
+  let argsStr = ''
+  try { argsStr = JSON.stringify(tool.arguments) } catch (e) { argsStr = String(tool.arguments || '') }
+  const mark = tool.success === false ? '✗' : tool.success ? '✓' : '…'
+  const markColor = tool.success === false ? 'var(--error)' : tool.success ? 'var(--success)' : 'var(--warning)'
+  return (
+    <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', marginBottom: 6, background: 'var(--bg-secondary)', fontSize: 12, overflow: 'hidden' }}>
+      <div onClick={() => setOpen(o => !o)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', cursor: 'pointer', fontFamily: 'var(--font-mono)' }}>
+        <span style={{ color: markColor }}>{mark}</span>
+        <span style={{ color: 'var(--accent)', fontWeight: 500 }}>{tool.name}</span>
+        <span style={{ color: 'var(--text-faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{argsStr}</span>
+        <span style={{ color: 'var(--text-faint)', fontSize: 10 }}>{open ? '收起' : '输出'}</span>
+      </div>
+      {open && tool.output && <pre style={{ margin: 0, padding: '8px 12px', borderTop: '1px solid var(--border)', fontSize: 11, color: 'var(--text-dim)', whiteSpace: 'pre-wrap', maxHeight: 240, overflow: 'auto', fontFamily: 'var(--font-mono)', lineHeight: 1.5 }}>{tool.output}</pre>}
+    </div>
+  )
+}
+
+function MessageBubble({ msg }) {
+  if (msg.role === 'user') {
+    return (
+      <div style={{
+        alignSelf: 'flex-end', maxWidth: '80%',
+        background: 'var(--accent-dim)', border: '1px solid var(--border-strong)',
+        borderRadius: 'var(--radius)', padding: '10px 14px', fontSize: 14, lineHeight: 1.6,
+        whiteSpace: 'pre-wrap',
+      }}>{msg.content}</div>
+    )
+  }
+  const live = !msg.content && (msg.reasoning || (msg.tools || []).length > 0)
+  return (
+    <div style={{ alignSelf: 'flex-start', maxWidth: '86%', width: 'fit-content', minWidth: 120 }}>
+      <ReasoningBlock text={msg.reasoning} live={msg.streaming && live} />
+      {(msg.tools || []).length > 0 && <div style={{ marginBottom: 8 }}>
+        {msg.tools.map((t, i) => <ToolCallCard key={i} tool={t} />)}
+      </div>}
+      {msg.content && <div style={{
+        background: 'var(--bg-hover)', border: '1px solid var(--border)',
+        borderRadius: 'var(--radius)', padding: '10px 14px', fontSize: 14, lineHeight: 1.6,
+        whiteSpace: 'pre-wrap',
+      }}>{msg.content}{msg.streaming && <span style={{ color: 'var(--accent)' }}>▍</span>}</div>}
     </div>
   )
 }
@@ -320,7 +566,7 @@ function AgentConsole() {
 
   const startAgent = async () => {
     if (!target) return
-    setRunning(true); setLogs([`🎯 目标: ${target}`, ...(selectedRoleInfo ? [`👤 角色: ${selectedRoleInfo.name}`] : []), ...(persistent ? ['🔄 持久化模式'] : [])])
+    setRunning(true); setLogs([`[TARGET] ${target}`, ...(selectedRoleInfo ? [`[ROLE] ${selectedRoleInfo.name}`] : []), ...(persistent ? ['[MODE] persistent'] : [])])
     const resp = await api(`${API}/agent/run`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ target, goal, task_type: taskType, role_id: selectedRoleId || undefined, persistent_mode: persistent }),
@@ -369,7 +615,7 @@ function AgentConsole() {
             <input type="checkbox" checked={persistent} onChange={e => setPersistent(e.target.checked)} />持久化
           </label>
           {!running ? (
-            <button onClick={startAgent} disabled={!target} style={{ ...btnStyle, background: 'var(--accent)', opacity: target ? 1 : 0.5 }}>🚀 启动</button>
+            <button onClick={startAgent} disabled={!target} style={{ ...btnStyle, background: 'var(--accent)', opacity: target ? 1 : 0.5 }}>启动</button>
           ) : (
             <button onClick={cancelAgent} style={{ ...btnStyle, background: 'var(--error)' }}>⏹ 停止</button>
           )}
@@ -390,7 +636,7 @@ function AgentConsole() {
           {bb ? (
             <div style={{ background: 'var(--bg-card)', borderRadius: 'var(--radius)', padding: 12, fontSize: 13, maxHeight: 500, overflow: 'auto', border: '1px solid var(--border)' }}>
               <div style={{ marginBottom: 8 }}><b>目标:</b> {bb.goal}</div>
-              <div style={{ marginBottom: 8 }}><b>状态:</b> {bb.goal_achieved ? <span style={{ color: 'var(--success)' }}>✅ 已达成</span> : '⏳ 进行中'}</div>
+              <div style={{ marginBottom: 8 }}><b>状态:</b> {bb.goal_achieved ? <span style={{ color: 'var(--success)' }}>● 已达成</span> : '○ 进行中'}</div>
               <div style={{ marginBottom: 4 }}><b>Facts ({bb.fact_count}):</b></div>
               {bb.facts?.map(f => (
                 <div key={f.id} style={{ background: 'var(--bg-hover)', borderRadius: 4, padding: '6px 8px', marginBottom: 4, fontSize: 12 }}>
@@ -735,8 +981,8 @@ function WebShellPanel() {
                     color: testResult.ok ? '#6ee7b7' : '#fca5a5',
                   }}>
                     {testResult.ok
-                      ? `✅ 连接成功 | 用户: ${testResult.user || '?'}`
-                      : `❌ 连接失败: ${testResult.error || '未知错误'}`}
+                      ? `连接成功 | 用户: ${testResult.user || '?'}`
+                      : `连接失败: ${testResult.error || '未知错误'}`}
                   </div>
                 )}
               </div>
@@ -910,7 +1156,7 @@ function YamlTools() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <h1 style={{ fontSize: 28, fontWeight: 700 }}>自定义工具</h1>
-        <button onClick={reloadTools} style={{ ...btnStyle, background: 'var(--info)', fontSize: 12 }}>🔄 重载到 Agent</button>
+        <button onClick={reloadTools} style={{ ...btnStyle, background: 'var(--info)', fontSize: 12 }}>重载到 Agent</button>
       </div>
 
       <Card title={editId ? '编辑工具' : '新建工具'}>
@@ -1100,7 +1346,7 @@ function McpConfig() {
             </div>
             {testResults[s.id] && (
               <div style={{ marginTop: 6, padding: '4px 8px', borderRadius: 4, fontSize: 11, background: testResults[s.id].status === 'connected' ? '#064e3b' : '#7f1d1d', color: testResults[s.id].status === 'connected' ? '#6ee7b7' : '#fca5a5' }}>
-                {testResults[s.id].status === 'connected' ? `✅ 连接成功` : `❌ 连接失败: ${testResults[s.id].status || testResults[s.id].error || 'error'}`}
+                {testResults[s.id].status === 'connected' ? `连接成功` : `连接失败: ${testResults[s.id].status || testResults[s.id].error || 'error'}`}
               </div>
             )}
           </div>
@@ -1223,11 +1469,52 @@ function ProviderForm({ providerKey, provider, onSave }) {
   )
 }
 
+// ── Skills / 技能页面 ──
+function SkillsPage() {
+  const [skills, setSkills] = useState([])
+  const [activeSkill, setActiveSkill] = useState(null)
+  const [content, setContent] = useState('')
+  useEffect(() => {
+    api(`${API}/skills`).then(r => r.json()).then(d => {
+      const list = d.skills || []
+      setSkills(list)
+      if (list.length) pick(list[0].name)
+    })
+  }, [])
+  const pick = (name) => {
+    setActiveSkill(name)
+    api(`${API}/skills/${name}`).then(r => r.json()).then(d => setContent(d.content || ''))
+  }
+  return (
+    <div>
+      <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 24, letterSpacing: -0.5 }}>技能库</h1>
+      <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+        <div style={{ width: 240, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {skills.map(s => (
+            <div key={s.name} onClick={() => pick(s.name)} style={{
+              padding: '10px 12px', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontSize: 13,
+              background: activeSkill === s.name ? 'var(--accent-light)' : 'var(--bg-card)',
+              border: `1px solid ${activeSkill === s.name ? 'var(--accent)' : 'var(--border)'}`,
+            }}>
+              <div style={{ fontWeight: 600 }}>{s.title || s.name}</div>
+              <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>{s.name}.md</div>
+            </div>
+          ))}
+          {!skills.length && <Loading />}
+        </div>
+        <Card style={{ flex: 1, minHeight: 400 }}>
+          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: 13, lineHeight: 1.7, fontFamily: 'inherit' }}>{content}</pre>
+        </Card>
+      </div>
+    </div>
+  )
+}
+
 // ── Shared Components ──
 function Card({ title, children, style }) {
   return (
     <div style={{ background: 'var(--bg-card)', borderRadius: 'var(--radius)', padding: 16, border: '1px solid var(--border)', boxShadow: 'var(--shadow)', ...style }}>
-      {title && <h3 style={{ fontSize: 13, color: 'var(--text-dim)', marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>{title}</h3>}
+      {title && <h3 style={{ fontSize: 10.5, color: 'var(--text-dim)', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.12em', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>{title}</h3>}
       {children}
     </div>
   )
@@ -1238,31 +1525,32 @@ function Terminal({ logs }) {
   useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight }, [logs])
   return (
     <div ref={ref} style={{
-      background: '#000', borderRadius: 'var(--radius)', padding: 12, fontFamily: 'monospace',
-      fontSize: 12, height: 400, overflow: 'auto', whiteSpace: 'pre-wrap', lineHeight: 1.5,
+      background: 'var(--bg-terminal)', borderRadius: 'var(--radius)', padding: 14, fontFamily: 'var(--font-mono)',
+      fontSize: 12, height: 400, overflow: 'auto', whiteSpace: 'pre-wrap', lineHeight: 1.6,
+      border: '1px solid var(--border)',
     }}>
-      {logs.length === 0 ? <span style={{ color: '#666' }}>等待输出...</span> :
+      {logs.length === 0 ? <span style={{ color: '#4a525e' }}>等待输出...</span> :
         logs.map((l, i) => <div key={i} style={{
-          color: l.startsWith('❌') ? 'var(--error)' : l.startsWith('✅') ? 'var(--success)' : l.startsWith('🔧') ? 'var(--warning)' : '#e0e0e0',
+          color: l.startsWith('[ERROR]') || l.startsWith('❌') ? 'var(--error)' : l.startsWith('[OK]') || l.startsWith('✅') ? 'var(--success)' : l.startsWith('[TOOL]') || l.startsWith('🔧') ? 'var(--warning)' : l.startsWith('[') ? 'var(--info)' : '#d5dae2',
         }}>{l}</div>)}
     </div>
   )
 }
 
-function Loading() { return <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>加载中...</div> }
+function Loading() { return <div style={{ color: 'var(--text-dim)', fontSize: 13, fontFamily: 'var(--font-mono)' }}>loading...</div> }
 
 function Button({ children, onClick }) {
-  return <button onClick={onClick} style={{ ...btnStyle, background: 'var(--accent)', textAlign: 'center', width: '100%' }}>{children}</button>
+  return <button onClick={onClick} style={{ ...btnStyle, background: 'var(--accent)', color: 'var(--accent-text)', textAlign: 'center', width: '100%' }}>{children}</button>
 }
 
 const inputStyle = {
-  background: 'var(--bg-hover)', border: '1px solid var(--border)', color: 'var(--text)',
+  background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'var(--text)',
   padding: '8px 12px', borderRadius: 'var(--radius-sm)', fontSize: 13, outline: 'none',
 }
 
 const btnStyle = {
-  border: 'none', color: '#fff', padding: '8px 16px', borderRadius: 'var(--radius-sm)',
-  fontSize: 13, cursor: 'pointer', fontWeight: 500, transition: 'opacity 0.15s',
+  border: 'none', color: 'var(--accent-text)', padding: '8px 16px', borderRadius: 'var(--radius-sm)',
+  fontSize: 13, cursor: 'pointer', fontWeight: 500, transition: 'opacity 0.12s',
 }
 
 // ── App ──
@@ -1277,9 +1565,15 @@ export default function App() {
     vulns: <Vulnerabilities />,
     yaml: <YamlTools />,
     tasks: <Tasks />,
+    skills: <SkillsPage />,
     mcp: <McpConfig />,
     roles: <Roles />,
     config: <Config />,
   }
-  return <Layout active={active} setActive={setActive}>{pages[active]}</Layout>
+  return (
+    <div>
+      <Layout active={active} setActive={setActive}>{pages[active]}</Layout>
+      <LoginOverlay />
+    </div>
+  )
 }

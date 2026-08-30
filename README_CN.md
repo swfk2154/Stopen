@@ -4,6 +4,10 @@
 
 ![Web 界面](stopen/TPIAN/Web.png)
 
+> **免责声明**：Stopen 仅面向**授权安全测试**场景（渗透测试项目、CTF 竞赛、
+> 自有系统或已获明确授权的目标研究）。严禁用于任何非法用途，使用者对自身
+> 行为负责，作者不承担任何滥用导致的法律责任。
+
 ---
 
 ## 一、快速启动
@@ -50,28 +54,18 @@ python run.py
 | 参数 | 说明 |
 |------|------|
 | `--port 8081` | 指定端口（默认 8080） |
-| `--host 0.0.0.0` | 监听所有网卡（局域网可访问，需配合 `--no-reload`） |
+| `--host 0.0.0.0` | 监听所有网卡（默认，局域网可访问） |
+| `--host 127.0.0.1` | 仅本机可访问 |
 | `--no-reload` | 禁用热重载 |
 
 环境变量: `$env:STOPEN_PORT=8081`
-
-> 安全提醒：默认只监听 `127.0.0.1`（本机），局域网访问需加 `--host 0.0.0.0`。
-> 开放到局域网前请确保其他用户可信，因为当前无认证机制。
 
 ### 1.2 访问 WebUI
 
 打开浏览器 → `http://localhost:8080`
 
-### 1.3 CLI 终端
-
-```powershell
-python cli.py                 # 交互式 REPL 模式
-python cli.py run 192.168.1.1 # 一键渗透测试
-python cli.py status          # 系统状态
-python cli.py --port 8081     # 指定后端端口
-```
-
-![CLI 界面](stopen/TPIAN/Cli.png)
+本机访问自动认证；局域网内其他机器访问时，界面会弹出登录面板，
+粘贴服务器上 `stopen/storage/.auth_secret` 文件中的 Token 即可。
 
 ---
 
@@ -121,18 +115,33 @@ WebUI → **MCP 配置** → 添加服务器
 
 导航 → **对话**
 
-对话模块提供与 LLM 的自然语言交互界面：
+对话模块提供与 LLM 的全流式自然语言交互界面：
 
+- **流式输出**：SSE 逐 token 实时渲染，光标跟随
+- **思考过程可视化**：推理模型（DeepSeek-R1 / GLM-Thinking / Qwen-Thinking 等）的
+  `reasoning_content` 实时流入可折叠的「思考过程」面板
+- **工具调用可视化**：助手可在对话中调用已注册的安全工具（端口扫描、HTTP 请求、
+  CVE 查询、编解码等），每次调用以卡片展示参数与输出（最多 8 轮）
 - **多轮对话**：上下文持续，支持连续问答
 - **模型选择**：顶部下拉菜单位选择要使用的 LLM 模型（仅显示已配置 API Key 且已启用的模型）
-- **对话管理**：
-  - 左侧面板列出所有对话
-  - 「➕ 新建对话」按钮创建新对话
-  - 点击切换、× 删除
-- **消息展示**：用户消息紫色气泡（右对齐），AI 回复灰色气泡（左对齐）
+- **对话管理**：左侧面板列出所有对话，新建 / 切换 / 删除
 - **发送方式**：Enter 发送，Shift+Enter 换行
 
-> 对话模块不走 OODA Agent 循环，适用于普通咨询和知识问答。
+> 对话模块使用轻量工具循环（非完整 OODA 黑板循环），适用于咨询问答与快速辅助验证。
+
+### 3.1.1 仪表盘
+
+导航 → **仪表盘**
+
+聚合统计视图（`/api/stats`）：任务、漏洞（按严重度着色）、C2 活跃会话、监听器、
+WebShell、对话、技能与工具数量，附快速操作与系统/MCP 状态卡片。
+
+### 3.1.2 技能库
+
+导航 → **技能库**
+
+浏览内置渗透/CTF 知识库（`stopen/skills/*.md`），左侧列表 + 右侧阅读面板；
+同一批技能文件会按任务类型注入 Agent 提示词。
 
 ### 3.2 Agent 渗透控制台
 
@@ -369,33 +378,21 @@ Stdio 模式下，command 和 args 会直接启动子进程，请确保命令可
 
 ### 3.10 主题切换
 
-侧边栏底部按钮切换 ☀️ 亮色 / 🌙 暗色模式，通过 localStorage 持久化，页面刷新后保持。
+侧边栏底部切换亮色 / 暗色模式，通过 localStorage 持久化，页面刷新后保持。
 
 ---
 
-## 四、CLI 命令
+## 四、测试
 
-| 命令 | 参数 | 说明 |
-|------|------|------|
-| `target` | `<host>` | 设置渗透目标 |
-| `goal` | `<描述>` | 设置目标说明 |
-| `run` | `[目标]` | 全自动渗透测试 |
-| `recon` | `[目标]` | 信息收集 |
-| `scan` | `[目标]` | 漏洞扫描 |
-| `exploit` | `[目标]` | 漏洞利用 |
-| `tools` | — | 列出所有可用工具 |
-| `status` | — | 系统状态（含黑板、工具分类） |
-| `listeners` | — | C2 监听器列表 |
-| `sessions` | — | 活跃 C2 会话 |
-| `webshells` | — | WebShell 列表 |
-| `vulns` | — | 漏洞列表 |
-| `config providers` | — | 查看 LLM 提供商状态 |
-| `think` | `on/off` | 切换思考过程显示 |
-| `health` | — | 检查后端连接 |
-| `help` | — | 显示帮助 |
-| `exit` / `q` | — | 退出 |
+```powershell
+pip install -r requirements-dev.txt
+pytest
+```
 
-输入任意自然语言会自动走 LLM 对话。
+测试套件（56 个用例）覆盖：认证中间件（含 token 接口仅本机可读的安全回归）、
+SQLite 多线程并发、WebShell 密码加密存储、配置加密、报告/PoC 生成、OODA 辅助
+函数（反幻觉门 / 失败分类）、LLM 流式解析（reasoning / tool_calls 分片聚合）、
+对话引擎工具循环。
 
 ---
 
@@ -404,17 +401,20 @@ Stdio 模式下，command 和 args 会直接启动子进程，请确保命令可
 ```
 Stopen/
 ├── run.py                    # 后端启动入口（支持 --port / --host 参数）
-├── cli.py                    # CLI 终端（交互式 + 单次命令模式）
 ├── install.py                # 一键安装脚本（pip 依赖 + 初始化 storage/ 目录）
+├── pytest.ini                # 测试配置
+├── requirements.txt          # 运行时依赖
+├── requirements-dev.txt      # 开发/测试依赖（pytest）
 ├── .gitignore                # Git 排除规则
 ├── README.md                 # 英文说明文档
 ├── README_CN.md              # 中文说明文档（本文件）
+├── tests/                    # pytest 测试套件
 ├── stopen/
-│   ├── main.py               # FastAPI 应用入口 + 路由注册 + 工具初始化
+│   ├── main.py               # FastAPI 应用入口 + lifespan + /api/stats + 日志
 │   ├── app_config/           # 系统配置模块
 │   │   ├── encryption.py     # AES (Fernet) 加密存储 API Key
 │   │   ├── providers.py      # 12 家 LLM 厂商定义（模型列表、API 地址）
-│   │   ├── auth.py           # Bearer Token 认证中间件
+│   │   ├── auth.py           # Bearer Token 认证（token 接口仅限本机读取）
 │   │   ├── settings.py       # 全局常量（路径、迭代上限等）
 │   │   └── logging_config.py # 日志配置
 │   ├── models/               # Pydantic 数据模型
@@ -425,22 +425,23 @@ Stopen/
 │   ├── routes/ (11 模块)     # FastAPI 路由
 │   │   ├── agent.py          # OODA Agent SSE 流式执行
 │   │   ├── c2.py             # C2 监听器/会话/Payload 模板 CRUD
-│   │   ├── chat.py           # 对话 API（LLM 直连，不走 Agent）
+│   │   ├── chat.py           # 对话 API + SSE 流式（思考/工具调用）
 │   │   ├── config.py         # LLM 提供商配置 CRUD + 测试
 │   │   ├── mcp_config.py     # MCP 服务器 CRUD + stdio 支持
 │   │   ├── roles.py          # 角色 CRUD（内置 + 自定义）
 │   │   ├── tasks.py          # 任务管理 + 报告/PoC 生成
 │   │   ├── tools.py          # 工具列表 + MCP 状态
 │   │   ├── vulnerabilities.py# 漏洞 CRUD + 统计
-│   │   ├── webshell.py       # WebShell + 文件操作 API
+│   │   ├── webshell.py       # WebShell + 文件操作 API（密码脱敏）
 │   │   └── yaml_tools.py     # 自定义 YAML 工具 CRUD + 重载
 │   ├── services/             # 业务逻辑层
 │   │   ├── agent_loop_ooda.py # OODA 核心循环引擎
+│   │   ├── chat_engine.py     # 流式对话引擎（思考透传 + 工具循环）
 │   │   ├── blackboard.py      # 黑板（Fact/Intent/Goal 数据结构）
 │   │   ├── c2_service.py      # C2 引擎（监听器管理 + 加密 + Payload 生成）
 │   │   ├── webshell_service.py# WebShell 三协议实现（蚁剑/冰蝎/哥斯拉）
-│   │   ├── db_service.py      # SQLite 数据库操作（13 张表）
-│   │   ├── llm_client.py      # LLM HTTP 客户端（支持 OpenAI/Anthropic 格式）
+│   │   ├── db_service.py      # SQLite 数据库操作（13 张表，线程级连接）
+│   │   ├── llm_client.py      # LLM HTTP 客户端（OpenAI/Anthropic，流式）
 │   │   ├── llm_service.py     # LLM 服务封装
 │   │   ├── report_service.py  # 报告 + PoC 脚本生成
 │   │   ├── skills_service.py  # 技能文件加载
@@ -455,11 +456,11 @@ Stopen/
 │   │       ├── mcp_bridge.py  # MCP 桥接器（HTTP + Stdio）
 │   │       └── yaml_loader.py # YAML 自定义工具运行时加载
 │   ├── frontend/             # React SPA 前端
-│   │   ├── index.html         # 入口 + CSS 变量 + 双主题
+│   │   ├── index.html         # 入口 + 设计令牌（Inter + JetBrains Mono 双字体）
 │   │   ├── src/
 │   │   │   ├── main.jsx       # React 入口
-│   │   │   └── App.jsx        # 完整 SPA（~800 行，含全部 11 个页面）
-│   │   └── dist/              # Vite 构建产物（gitignored）
+│   │   │   └── App.jsx        # 完整 SPA（12 个页面，SVG 图标，登录浮层）
+│   │   └── dist/              # Vite 构建产物（已纳入版本管理）
 │   ├── skills/ (8 个)        # 渗透技能知识库 (.md 文件)
 │   │   ├── recon.md           # 信息收集方法论
 │   │   ├── vuln_discovery.md  # 漏洞发现方法论
@@ -471,7 +472,6 @@ Stopen/
 │   │   └── ctf_reverse.md     # CTF 逆向指南
 │   ├── TPIAN/                # 界面截图
 │   │   ├── Web.png            # WebUI 首页截图
-│   │   ├── Cli.png            # CLI 终端截图
 │   │   └── Webshell-web.png   # WebShell 页面截图
 │   └── storage/              # 运行时数据（.gitignore 排除）
 │       ├── stopen.db          # SQLite 主数据库
@@ -521,14 +521,19 @@ python run.py --port 8081
 ## 七、安全说明
 
 1. **API Key 加密存储**：使用 Fernet (AES) 对称加密存储在磁盘上，非明文
-2. **认证机制**：所有 `/api/*` 路由（除 `/api/health`、`/api/auth/*` 外）需要 Bearer Token 认证，token 自动生成并持久化到 `storage/.auth_secret`
-3. **CORS**：白名单机制，仅允许 `localhost:3000/8080/8081`，无通配符
-4. **默认监听**：只监听 `127.0.0.1`，开放局域网需 `--host 0.0.0.0` 显式指定
-5. **C2 通信**：AES-256-CTR / XOR 加密（每个监听器独立配置密钥）
-6. **C2 密钥**：API 返回时自动掩码为 `****`
-7. **WebShell 密码**：以明文存储在 SQLite 数据库中，请确保 `storage/` 目录访问受控
-8. **`.gitignore`**：已排除 `*.db`、`*.enc`、`*.key`、`logs/`、`reports/`、`.auth_secret`
-9. **YAML 工具 / MCP Stdio**：command 直接传递给子进程，请确保添加的命令可信
+2. **认证机制**：所有 `/api/*` 路由（除 `/api/health` 外）需要 Bearer Token 认证（常量时间比较防时序侧信道），token 自动生成并持久化到 `storage/.auth_secret`
+3. **Token 接口仅限本机**：`/api/auth/config` 拒绝远程客户端匿名读取 —— 局域网访问必须通过登录面板手动输入 token
+4. **CORS**：白名单机制，仅允许 `localhost:3000/8080/8081`，无通配符
+5. **默认监听**：`0.0.0.0`（局域网可访问）。如仅本机使用请 `--host 127.0.0.1`；远程访问一律需要 token
+6. **C2 通信**：AES-256-CTR / XOR 加密（每个监听器独立配置密钥）
+7. **C2 密钥**：API 返回时自动掩码为 `****`
+8. **WebShell 密码**：SQLite 中 AES 加密存储（共用 `keyfile.key`），列表 API 返回 `****`；旧明文数据读取时自动兼容
+9. **`.gitignore`**：已排除 `*.db`、`*.enc`、`*.key`、`logs/`、`reports/`、`.auth_secret`
+10. **YAML 工具 / MCP Stdio**：command 直接传递给子进程，请确保添加的命令可信
+
+> 杀软提示：C2/WebShell 模块（`c2_service.py`、`webshell_service.py`）可能被
+> Windows Defender 等杀毒软件报毒隔离。若文件莫名消失，请将项目目录加入杀软
+> 白名单，并用 `git checkout -- <file>` 恢复。
 
 ---
 
@@ -580,8 +585,8 @@ L4: 混淆/换攻击面
 
 1. **WebSocket Payload 加密不兼容**：Python WS Payload 现在使用 AES-256-CTR 加密，但服务端 `_start_ws()` 的加密方式可能不匹配。实际使用中建议先测试验证。
 2. **HTTPS/WSS 不支持**：HTTP 和 WebSocket 监听器目前只支持明文协议。生产环境如需加密，建议使用反向代理（如 Nginx）终止 TLS。
-3. **SQLite 单连接**：数据库使用单个连接，高并发场景可能性能受限。当前为单用户工具，影响有限。
-4. **速率限制**：所有 API 端点目前无速率限制。
+3. **速率限制**：所有 API 端点目前无速率限制。
+4. **Anthropic 工具循环**：Anthropic 原生模型暂不支持对话工具循环（仅支持 OpenAI 兼容端点）。
 
 ---
 
