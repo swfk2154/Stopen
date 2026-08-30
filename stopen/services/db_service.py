@@ -282,7 +282,7 @@ class Database:
         lid = str(uuid.uuid4())[:8]
         now = self._now()
         import secrets
-        secret = secrets.token_hex(16)
+        secret = secrets.token_hex(32)  # 256-bit，匹配 aes-256-ctr
         self._get_conn().execute(
             "INSERT INTO listeners (id,name,listener_type,host,port,status,secret,encryption_type,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
             (lid, name, listener_type, host, port, "stopped", secret, encryption_type, now),

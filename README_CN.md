@@ -228,19 +228,25 @@ WebShell 模块支持三种主流 Webshell 协议的连接与操作。
 
 C2（Command & Control）框架用于管理远程主机的控制信道。
 
+**引擎架构**：监听器运行在独立的 **c2d Go 守护进程**（仓库 `c2d/` 目录）——
+goroutine/连接模型可承载数万并发会话。Python 后端保持控制面角色
+（REST API / SQLite 会话任务 / Payload 生成）；c2d 通过内部 bridge 接口
+注册会话、拉取任务、回写结果。若 Go 二进制缺失且本机无 Go 工具链，
+自动回退 legacy 纯 Python 监听器（线上协议逐字节兼容）。
+
 **监听器类型**：
 
 | 类型 | 说明 | 适用场景 |
 |------|------|----------|
 | TCP Reverse | 反向连接监听器 | 目标可主动连接外网 |
 | HTTP Beacon | HTTP 轮询通信 | 防火墙严格的环境 |
-| WebSocket | WebSocket 持久连接 | 需要低延迟双向通信 |
+| WebSocket | WebSocket 持久连接（服务端主动推送任务） | 需要低延迟双向通信 |
 
 **加密方式**（每个监听器独立配置）：
 
 | 加密 | 算法 | 适用场景 |
 |------|------|----------|
-| AES-256-CTR | 对称加密，IV 随机 | 默认推荐，安全性最高 |
+| AES-256-CTR | 对称加密，IV 随机（兼容 128/192/256 位密钥） | 默认推荐，安全性最高 |
 | XOR | 简单异或加密 | 兼容性优先，无依赖 |
 
 **Payload 生成**：
@@ -258,7 +264,7 @@ C2（Command & Control）框架用于管理远程主机的控制信道。
 - 模板内容支持三个占位符：`{host}`、`{port}`、`{secret}`
 - 生成 Payload 时可通过 `listener_id` 参数自动匹配监听器密钥
 
-**注意**：HTTP 和 WebSocket 监听器依赖 `aiohttp` 库。
+**注意**：HTTP 和 WebSocket 监听器依赖 `aiohttp` 库（仅 legacy 回退路径需要；Go 引擎零依赖）。
 
 ### 3.5 漏洞管理
 
@@ -401,13 +407,22 @@ SQLite 多线程并发、WebShell 密码加密存储、配置加密、报告/PoC
 ```
 Stopen/
 ├── run.py                    # 后端启动入口（支持 --port / --host 参数）
-├── install.py                # 一键安装脚本（pip 依赖 + 初始化 storage/ 目录）
+├── install.py                # 一键安装脚本（pip 依赖 + c2d 构建 + 初始化 storage/）
 ├── pytest.ini                # 测试配置
 ├── requirements.txt          # 运行时依赖
 ├── requirements-dev.txt      # 开发/测试依赖（pytest）
 ├── .gitignore                # Git 排除规则
 ├── README.md                 # 英文说明文档
 ├── README_CN.md              # 中文说明文档（本文件）
+├── c2d/                      # Go C2 监听器守护进程（高性能引擎）
+│   ├── main.go               # 控制面 API（--addr / --ctl-token / --backend-url）
+│   ├── crypto.go             # AES-CTR / XOR（与 Python 端逐字节兼容）
+│   ├── bridge.go             # 内部 bridge 回调（注册会话/拉任务/回结果）
+│   ├── listener_tcp.go       # TCP 反向监听器
+│   ├── listener_http.go      # HTTP Beacon 监听器
+│   ├── listener_ws.go        # WebSocket 监听器（服务端主动推送）
+│   ├── c2d.exe / c2d         # 预编译守护进程二进制（install.py 可重建）
+│   └── crypto_test.go        # 跨语言加密向量测试（Python 生成）
 ├── tests/                    # pytest 测试套件
 ├── stopen/
 │   ├── main.py               # FastAPI 应用入口 + lifespan + /api/stats + 日志
@@ -539,6 +554,25 @@ python run.py --port 8081
 
 ## 八、架构
 
+### 混合引擎：Go 数据面 + Python 控制面
+
+```
+┌────────────────────────────────────────────────────────┐
+│  WebUI (React SPA)                                     │
+└──────────────────────────┬─────────────────────────────┘
+                           │ REST + SSE
+┌──────────────────────────▼─────────────────────────────┐
+│  Python 控制面 (FastAPI)                                │
+│  REST API / SQLite(13表) / LLM / OODA / 报告 / Payload │
+└──────────▲─────────────────────────────▲───────────────┘
+           │ bridge 内部接口              │ 启动/停止(ctl API)
+┌──────────┴─────────────────────────────┴───────────────┐
+│  c2d (Go 守护进程, 数据面)                               │
+│  TCP 反向 / HTTP Beacon / WebSocket 监听器               │
+│  AES-256-CTR / XOR 加解密 · goroutine/连接 · 数万并发   │
+└────────────────────────────────────────────────────────┘
+```
+
 ### OODA 循环 + 黑板驱动
 
 ```
@@ -583,10 +617,10 @@ L4: 混淆/换攻击面
 
 ## 九、已知问题
 
-1. **WebSocket Payload 加密不兼容**：Python WS Payload 现在使用 AES-256-CTR 加密，但服务端 `_start_ws()` 的加密方式可能不匹配。实际使用中建议先测试验证。
-2. **HTTPS/WSS 不支持**：HTTP 和 WebSocket 监听器目前只支持明文协议。生产环境如需加密，建议使用反向代理（如 Nginx）终止 TLS。
-3. **速率限制**：所有 API 端点目前无速率限制。
-4. **Anthropic 工具循环**：Anthropic 原生模型暂不支持对话工具循环（仅支持 OpenAI 兼容端点）。
+1. **HTTPS/WSS 不支持**：HTTP 和 WebSocket 监听器目前只支持明文协议。生产环境如需加密，建议使用反向代理（如 Nginx）终止 TLS。
+2. **速率限制**：所有 API 端点目前无速率限制。
+3. **Anthropic 工具循环**：Anthropic 原生模型暂不支持对话工具循环（仅支持 OpenAI 兼容端点）。
+4. **legacy 监听器并发**：Python 回退监听器为单任务 asyncio 循环，适合少量会话；真实并发场景请使用 Go 引擎。
 
 ---
 

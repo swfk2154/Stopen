@@ -60,7 +60,7 @@ def try_apt_install():
 
 
 def install_deps():
-    print("[1/2] 安装 Python 依赖...")
+    print("[1/4] 安装 Python 依赖...")
     check_aiohttp_python_version()
 
     # 尝试 1: 正常 pip 安装
@@ -149,6 +149,31 @@ def build_frontend():
     return True
 
 
+def build_c2_daemon():
+    """构建 Go C2 守护进程（c2d）。已有二进制则跳过，无 Go 工具链则提示回退 legacy"""
+    c2d_dir = ROOT / "c2d"
+    if not (c2d_dir / "go.mod").is_file():
+        return
+    exe = "c2d.exe" if os.name == "nt" else "c2d"
+    binary = c2d_dir / exe
+    if binary.is_file():
+        print("✓ c2d (Go C2 守护进程) 二进制已存在，跳过构建")
+        return
+    if not shutil.which("go"):
+        print("⚠ 未检测到 Go 工具链，C2 监听器将回退纯 Python 实现（功能一致，并发性能较低）")
+        print("  如需 Go 引擎: 安装 https://go.dev 后重新运行 python install.py")
+        return
+    print("\n[2/4] 构建 Go C2 守护进程 (c2d)...")
+    env = os.environ.copy()
+    env.setdefault("GOPROXY", "https://goproxy.cn,https://proxy.golang.org,direct")
+    cmd = ["go", "build", "-trimpath", "-ldflags", "-s -w", "-o", exe, "."]
+    r = subprocess.run(cmd, cwd=str(c2d_dir), capture_output=True, text=True, env=env, timeout=600)
+    if r.returncode == 0:
+        print("✓ c2d 构建完成")
+    else:
+        print(f"✗ c2d 构建失败（将回退 legacy）: {r.stderr[-200:]}")
+
+
 def main():
     print("=" * 50)
     print("Stopen - 自动化渗透测试 Agent")
@@ -157,10 +182,12 @@ def main():
     if not install_deps():
         sys.exit(1)
 
+    build_c2_daemon()
+
     # 前端构建（如无 dist）
     frontend_dist = ROOT / "stopen" / "frontend" / "dist"
     if not (frontend_dist / "index.html").is_file():
-        print("\n[2/3] 构建前端...")
+        print("\n[3/4] 构建前端...")
         npm_ok = build_frontend()
         if npm_ok:
             print("✓ 前端构建完成")
@@ -168,10 +195,10 @@ def main():
             print("⚠ 前端构建失败，后端将以 API-only 模式运行")
             print("  可手动构建: cd stopen/frontend && npm install && npx vite build")
     else:
-        print("\n[2/3] 前端 dist 已存在，跳过构建")
+        print("\n[3/4] 前端 dist 已存在，跳过构建")
 
     # 初始化存储目录
-    print("\n[3/3] 初始化存储目录...")
+    print("\n[4/4] 初始化存储目录...")
     storage_dirs = [
         ROOT / "stopen" / "storage",
         ROOT / "stopen" / "storage" / "logs",

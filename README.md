@@ -234,19 +234,27 @@ Nav → **C2 Panel**
 
 C2 (Command & Control) framework for managing remote host control channels.
 
+**Engine**: listeners run in **c2d**, a standalone Go daemon (`c2d/` in the
+repo) — goroutine-per-connection scales to tens of thousands of concurrent
+sessions. The Python backend stays the control plane (REST API, SQLite
+sessions/tasks, payload generation); c2d registers sessions, pulls tasks and
+reports results via internal bridge endpoints. If the Go binary is missing and
+no Go toolchain is available, it automatically falls back to the legacy pure
+Python listeners (identical wire protocol).
+
 **Listener Types**:
 
 | Type | Description | Use Case |
 |------|-------------|----------|
 | TCP Reverse | Reverse connection listener | Target can connect outbound |
 | HTTP Beacon | HTTP polling communication | Strict firewall environments |
-| WebSocket | WebSocket persistent connection | Low-latency bidirectional communication |
+| WebSocket | WebSocket persistent connection (server-push task loop) | Low-latency bidirectional communication |
 
 **Encryption** (configurable per listener):
 
 | Type | Algorithm | Use Case |
 |------|-----------|----------|
-| AES-256-CTR | Symmetric encryption, random IV | Default, highest security |
+| AES-256-CTR | Symmetric encryption, random IV (128/192/256-bit keys supported) | Default, highest security |
 | XOR | Simple XOR obfuscation | Maximum compatibility, no dependencies |
 
 **Payload Generation**:
@@ -264,7 +272,8 @@ C2 (Command & Control) framework for managing remote host control channels.
 - Supports 3 placeholders: `{host}`, `{port}`, `{secret}`
 - Can auto-match listener secret key via `listener_id` parameter
 
-> Note: HTTP and WebSocket listeners require the `aiohttp` library.
+> Note: HTTP and WebSocket listeners require the `aiohttp` library (legacy
+> fallback only; the Go engine is dependency-free).
 
 ### 3.5 Vulnerability Management
 
@@ -408,14 +417,23 @@ parsing, and the chat tool-loop engine.
 ```
 Stopen/
 ├── run.py                    # Backend entry (supports --port/--host)
-├── install.py                # One-click install script (pip deps + storage/ init)
+├── install.py                # One-click install (pip deps + c2d build + storage/ init)
 ├── pytest.ini                # Test configuration
 ├── requirements.txt          # Runtime dependencies
 ├── requirements-dev.txt      # Dev/test dependencies (pytest)
 ├── .gitignore                # Git exclusion rules
 ├── README.md                 # English documentation
 ├── README_CN.md              # Chinese documentation
-├── tests/                    # pytest suite (auth/db/crypto/chat engine/...)
+├── c2d/                      # Go C2 listener daemon (high-performance engine)
+│   ├── main.go               # Control-plane API (--addr/--ctl-token/--backend-url)
+│   ├── crypto.go             # AES-CTR / XOR (Python-compatible byte format)
+│   ├── bridge.go             # Internal callbacks to Python backend
+│   ├── listener_tcp.go       # TCP reverse listener
+│   ├── listener_http.go      # HTTP beacon listener
+│   ├── listener_ws.go        # WebSocket listener (server-push task loop)
+│   ├── c2d.exe / c2d         # Prebuilt daemon binary (rebuilt by install.py)
+│   └── crypto_test.go        # Cross-language crypto vectors (from Python)
+├── tests/                    # pytest suite (auth/db/crypto/chat engine/C2 e2e/...)
 ├── stopen/
 │   ├── main.py               # FastAPI app + lifespan + /api/stats + logs
 │   ├── app_config/           # Configuration module
@@ -545,6 +563,25 @@ python run.py --port 8081
 
 ## 8. Architecture
 
+### Hybrid engine: Go data plane + Python control plane
+
+```
+┌────────────────────────────────────────────────────────┐
+│  WebUI (React SPA)                                     │
+└──────────────────────────┬─────────────────────────────┘
+                           │ REST + SSE
+┌──────────────────────────▼─────────────────────────────┐
+│  Python 控制面 (FastAPI)                                │
+│  REST API / SQLite(13表) / LLM / OODA / 报告 / Payload │
+└──────────▲─────────────────────────────▲───────────────┘
+           │ bridge 内部接口              │ 启动/停止(ctl API)
+┌──────────┴─────────────────────────────┴───────────────┐
+│  c2d (Go 守护进程, 数据面)                               │
+│  TCP 反向 / HTTP Beacon / WebSocket 监听器               │
+│  AES-256-CTR / XOR 加解密 · goroutine/连接 · 数万并发   │
+└────────────────────────────────────────────────────────┘
+```
+
 ### OODA Loop + Blackboard
 
 ```
@@ -588,10 +625,10 @@ L4: Obfuscation/change attack surface
 
 ## 9. Known Issues
 
-1. **WebSocket payload encryption incompatibility**: Python WS Payload uses AES-256-CTR, but server `_start_ws()` may have mismatched decryption. Test before production use.
-2. **No HTTPS/WSS support**: HTTP and WebSocket listeners support plaintext only. Use a reverse proxy (e.g. Nginx) for TLS termination in production.
-3. **No rate limiting**: All API endpoints currently have no rate limiting.
-4. **Anthropic tool-loop**: Anthropic-native models do not support the chat tool loop yet (OpenAI-compatible endpoints only).
+1. **No HTTPS/WSS support**: HTTP and WebSocket listeners support plaintext only. Use a reverse proxy (e.g. Nginx) for TLS termination in production.
+2. **No rate limiting**: All API endpoints currently have no rate limiting.
+3. **Anthropic tool-loop**: Anthropic-native models do not support the chat tool loop yet (OpenAI-compatible endpoints only).
+4. **Legacy listener scaling**: the Python fallback listeners are single-connection-per-task asyncio loops — fine for a few sessions; use the Go engine for real concurrency.
 
 ---
 
