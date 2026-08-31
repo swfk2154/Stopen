@@ -218,6 +218,19 @@ function Layout({ children, active, setActive }) {
 }
 
 // ── Dashboard ──
+function Row({ k, v, mono }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '3px 0', minWidth: 0 }}>
+      <span style={{ color: 'var(--text-dim)', flexShrink: 0 }}>{k}</span>
+      <span style={{ textAlign: 'right', ...(mono ? { fontFamily: 'var(--font-mono)', fontSize: 12.5 } : {}) }}>{v}</span>
+    </div>
+  )
+}
+
+function Empty({ text }) {
+  return <div style={{ fontSize: 12.5, color: 'var(--text-faint)', padding: '8px 0' }}>{text}</div>
+}
+
 function Dashboard({ setActive }) {
   const [health, setHealth] = useState(null)
   const [tools, setTools] = useState(null)
@@ -227,6 +240,26 @@ function Dashboard({ setActive }) {
     api(`${API}/tools`).then(r => r.json()).then(setTools)
     api(`${API}/stats`).then(r => r.json()).then(setStats)
   }, [])
+  // 运行时长以后端 /api/stats 的 uptime_seconds 为基准，本地每秒递增
+  const uptimeBase = useRef(null)
+  const uptimeAt = useRef(null)
+  const [uptime, setUptime] = useState('')
+  useEffect(() => {
+    const fmt = (ms) => {
+      const s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60)
+      return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s % 60}s` : `${s}s`
+    }
+    if (stats && typeof stats.uptime_seconds === 'number') {
+      uptimeBase.current = stats.uptime_seconds * 1000
+      uptimeAt.current = Date.now()
+    }
+    const t = setInterval(() => {
+      if (uptimeBase.current == null) return
+      setUptime(fmt(uptimeBase.current + (Date.now() - uptimeAt.current)))
+    }, 1000)
+    return () => clearInterval(t)
+  }, [stats])
+  const engine = stats?.c2_engine
   const sevColors = { critical: 'var(--error)', high: '#fb923c', medium: 'var(--warning)', low: 'var(--info)', info: 'var(--text-dim)' }
   const statTile = (label, value, color, onClick) => (
     <div onClick={onClick} style={{
@@ -257,35 +290,32 @@ function Dashboard({ setActive }) {
         {Object.entries(stats.vulnerabilities.by_severity || {}).map(([sev, cnt]) =>
           statTile(`${sev.toUpperCase()} 漏洞`, cnt, sevColors[sev] || 'var(--text)', () => setActive('vulns')))}
       </div>}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
         <Card title="系统状态">
-          {health ? <div>
-            <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>版本: {health.version}</div>
-            <div style={{ fontSize: 13, marginTop: 4 }}>
-              状态: <span style={{ color: 'var(--success)' }}>● 运行中</span>
-            </div>
-            <div style={{ marginTop: 8 }}>
-              {health.features?.map(f =>
-                <span key={f} style={{ background: 'var(--accent-light)', color: 'var(--accent)', padding: '2px 8px', borderRadius: 20, marginRight: 4, fontSize: 11 }}>{f}</span>
-              )}
-            </div>
+          {health ? <div style={{ fontSize: 13 }}>
+            <Row k="版本" v={`v${health.version}`} mono />
+            <Row k="服务状态" v={<span style={{ color: 'var(--success)' }}>● 运行中</span>} />
+            <Row k="C2 引擎" v={<span style={{ color: engine === 'go' ? 'var(--success)' : 'var(--warning)', fontFamily: 'var(--font-mono)' }}>{engine === 'go' ? 'Go (c2d)' : engine === 'legacy' ? 'Legacy (Python)' : '—'}</span>} />
+            <Row k="运行时长" v={uptime} mono />
           </div> : <Loading />}
         </Card>
         <Card title="MCP 服务器">
-          {tools?.mcp_servers ? Object.entries(tools.mcp_servers).map(([k, v]) => (
-            <div key={k} style={{ fontSize: 13, marginBottom: 4 }}>
-              <span style={{ textTransform: 'capitalize' }}>{k}: </span>
-              <span style={{ color: v === 'connected' ? 'var(--success)' : 'var(--error)' }}>
-                {v === 'connected' ? '● 已连接' : '○ 未连接'}
-              </span>
-            </div>
-          )) : <Loading />}
+          {tools?.mcp_servers ? (
+            Object.keys(tools.mcp_servers).length ? Object.entries(tools.mcp_servers).map(([k, v]) => (
+              <div key={k} style={{ fontSize: 13, marginBottom: 4 }}>
+                <span style={{ textTransform: 'capitalize' }}>{k}: </span>
+                <span style={{ color: v === 'connected' ? 'var(--success)' : 'var(--error)' }}>
+                  {v === 'connected' ? '● 已连接' : '○ 未连接'}
+                </span>
+              </div>
+            )) : <Empty text="暂未配置 MCP 服务器" />
+          ) : <Loading />}
         </Card>
         <Card title="任务状态">
           {stats ? <div style={{ fontSize: 13 }}>
-            <div>运行中: <span style={{ color: 'var(--success)' }}>{stats.tasks?.running ?? 0}</span> / {stats.tasks?.total ?? 0}</div>
-            <div style={{ marginTop: 4 }}>C2 监听: <span style={{ color: stats.listeners?.running ? 'var(--success)' : 'var(--text-dim)' }}>{stats.listeners?.running ?? 0}</span> / {stats.listeners?.total ?? 0}</div>
-            <div style={{ marginTop: 4 }}>WebShell 活跃: {stats.webshells?.active ?? 0} / {stats.webshells?.total ?? 0}</div>
+            <Row k="运行中任务" v={<span><span style={{ color: 'var(--success)' }}>{stats.tasks?.running ?? 0}</span> / {stats.tasks?.total ?? 0}</span>} />
+            <Row k="C2 监听器" v={<span><span style={{ color: stats.listeners?.running ? 'var(--success)' : 'var(--text-dim)' }}>{stats.listeners?.running ?? 0}</span> / {stats.listeners?.total ?? 0} 运行中</span>} />
+            <Row k="WebShell" v={`${stats.webshells?.active ?? 0} / ${stats.webshells?.total ?? 0} 活跃`} />
           </div> : <Loading />}
         </Card>
         <Card title="快速操作">

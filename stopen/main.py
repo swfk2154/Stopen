@@ -1,9 +1,12 @@
 """Stopen FastAPI 入口"""
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+APP_START = time.time()
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -135,6 +138,7 @@ async def get_skill(name: str):
 async def stats():
     """仪表盘聚合统计"""
     from services.db_service import db
+    from services.c2_service import c2_service
     listeners = db.list_listeners()
     sessions = db.list_sessions()
     webshells = db.list_webshells()
@@ -144,7 +148,13 @@ async def stats():
     skills = list_all_skills()
     tools = tool_registry
     running_tasks = sum(1 for t in tasks if t.get("status") == "running")
+    try:
+        c2_engine = c2_service.get_status().get("engine", "unknown")
+    except Exception:
+        c2_engine = "unknown"
     return {
+        "c2_engine": c2_engine,
+        "uptime_seconds": int(time.time() - APP_START),
         "listeners": {"total": len(listeners),
                       "running": sum(1 for l in listeners if l.get("status") == "running")},
         "sessions": {"total": len(sessions),

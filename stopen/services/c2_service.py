@@ -234,11 +234,12 @@ class C2Service:
         return await legacy.stop_listener(lid)
 
     def get_status(self) -> dict:
-        engine = "go" if self.daemon._health_ok() else "legacy"
+        # 有 Go 二进制（或守护进程已运行）即视为 Go 引擎；否则 legacy 回退
+        go_ready = self.daemon._health_ok() or self.daemon.binary_available()
         return {
             "running_listeners": len(db.list_listeners()),
             "total_sessions": len(db.list_sessions()),
-            "engine": engine,
+            "engine": "go" if go_ready else "legacy",
         }
 
     # ── Payload 生成（纯字符串模板，无性能诉求，保留 Python 实现）──
